@@ -131,6 +131,25 @@ Error :: enum {
 	Unknown_Interlace_Method,
 	Requested_Channel_Not_Present,
 	Post_Processing_Error,
+
+	Invalid_Signature,
+	Corrupt,
+	Version_Unsupported,
+	Invalid_Feature_Combo,
+	Feature_Unsupported,
+	Compression_Unsupported,
+	Name_Too_Long,
+	End_of_Header,
+	Invalid_Attribute,
+	Missing_Chunk_Count_Attribute,
+	Missing_TileDesc_Attribute,
+
+
+	/*
+		For the simple OpenEXR `load` interface, mixed-type
+		RGBA channels are not supported.
+	*/
+	Mixed_Integer_And_Float_Channels_Not_Supported,
 }
 
 /*
