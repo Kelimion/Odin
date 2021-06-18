@@ -72,6 +72,27 @@ main :: proc() {
 
 		if had_to_allocate { defer bytes.buffer_destroy(backing); }
 
+		fmt.println("\nConvert []f16le (x2) to []u16 (x2).");
+
+		res2: []u16;
+		res2, backing, had_to_allocate, err = convert_buffer_of_type(2, u16, f16le, b);
+		fmt.printf("res      : %v\n", res2);
+		fmt.printf("backing  : %v\n", backing);
+		fmt.printf("allocated: %v\n", had_to_allocate);
+		fmt.printf("err      : %v\n", err);
+
+		if had_to_allocate { defer bytes.buffer_destroy(backing); }
+
+		fmt.println("\nConvert []f16le (x2) to []u16 (x2), force_convert=true.");
+
+		res2, backing, had_to_allocate, err = convert_buffer_of_type(2, u16, f16le, b, true);
+		fmt.printf("res      : %v\n", res2);
+		fmt.printf("backing  : %v\n", backing);
+		fmt.printf("allocated: %v\n", had_to_allocate);
+		fmt.printf("err      : %v\n", err);
+
+		if had_to_allocate { defer bytes.buffer_destroy(backing); }		
+
 		fmt.println("\nAllocate a new buffer with create_buffer_of_type.");
 		res, backing, err = create_buffer_of_type(2, f32);
 		fmt.printf("res      : %v\n", res);

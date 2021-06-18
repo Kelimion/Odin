@@ -191,7 +191,7 @@ need_endian_conversion :: proc($FT: typeid, $TT: typeid) -> (res: bool) {
 	return;
 }
 
-convert_buffer_of_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer: []u8) -> (
+convert_buffer_of_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer: []u8, force_convert := false) -> (
 	res: []TT, backing: ^bytes.Buffer, alloc: bool, err: bool) {
 
 	backing = new(bytes.Buffer);
@@ -221,6 +221,7 @@ convert_buffer_of_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer
 		*/
 		convert := need_endian_conversion(FT, TT);
 		convert |= (size_of(TT) * count != len(from_buffer));
+		convert |= force_convert;
 
 		if !convert {
 			// It's just a data cast
@@ -232,9 +233,10 @@ convert_buffer_of_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer
 			}
 			return;
 		} else {
-			if (size_of(TT) * count == len(from_buffer)) {
+			if size_of(TT) * count == len(from_buffer) {
 				/*
 					Same size, can do an in-place Endianness conversion.
+					If `force_convert`, this also handles the per-element cast instead of slice_data_cast.
 				*/
 				res  = mem.slice_data_cast([]TT, from_buffer);
 				bytes.buffer_init(backing, from_buffer);
