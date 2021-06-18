@@ -251,18 +251,18 @@ CIE_1931 :: struct #packed {
 #assert(size_of(CIE_1931) == 8);
 
 Chromacities_Raw :: struct #packed {
-   r: CIE_1931_Raw,
-   g: CIE_1931_Raw,
-   b: CIE_1931_Raw,
-   w: CIE_1931_Raw,   
+	r: CIE_1931_Raw,
+	g: CIE_1931_Raw,
+	b: CIE_1931_Raw,
+	w: CIE_1931_Raw,
 }
 #assert(size_of(Chromacities_Raw) == 32);
 
 Chromacities :: struct #packed {
-   w: CIE_1931,
-   r: CIE_1931,
-   g: CIE_1931,
-   b: CIE_1931,
+	w: CIE_1931,
+	r: CIE_1931,
+	g: CIE_1931,
+	b: CIE_1931,
 }
 #assert(size_of(Chromacities) == 32);
 
@@ -1163,8 +1163,7 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 	info := img.sidecar.(^Info);
 	channels := info.channels;
 
-	out: any;
-	buf: bytes.Buffer;
+	buf: ^bytes.Buffer;
 
 	fmt.println();
 	if "R" in channels || "G" in channels || "B" in channels {
@@ -1233,30 +1232,66 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 
 		pixel_buffer_size := image.compute_buffer_size(img.width, img.height, channel_count, img.depth);
 		fmt.printf("We need %v bytes for the output buffer.\n", pixel_buffer_size);
-		
-		bytes.buffer_init_allocator(&buf, pixel_buffer_size, pixel_buffer_size);
 
+		pixels        := img.width * img.height;
+		element_count := pixels * channel_count;
+		e:     bool;
+		alloc: bool;
+		
 		switch(pixel_type) {
 		case .u32le:
-			pix := mem.slice_data_cast([]u32, buf.buf[:]);
-			assert(len(pix) == img.width * img.height * channel_count);
-			out = pix;
-		case .f16le:
-			pix := mem.slice_data_cast([]f16, buf.buf[:]);
-			assert(len(pix) == img.width * img.height * channel_count);
-			out = pix;
-		case .f32le:
-			pix := mem.slice_data_cast([]f32, buf.buf[:]);
-			assert(len(pix) == img.width * img.height * channel_count);
-			out = pix;
-		}
+			res: []u32;
+			res, buf, e = bytes.buffer_create_of_type(element_count, u32);
+			assert(len(res) == element_count);
 
-		if have_R {
-			pixel_type = channels["R"].pixel_type;
+		case .f16le:
+			res: []f16;
+			res, buf, e = bytes.buffer_create_of_type(element_count, f16);
+			assert(len(res) == element_count);
+
+			R: []f16;
+			R_buf: ^bytes.Buffer;
+			G: []f16;
+			G_buf: ^bytes.Buffer;
+			B: []f16;
+			B_buf: ^bytes.Buffer;
+			A: []f16;
+			A_buf: ^bytes.Buffer;
+
+			if have_R {
+				R, R_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["R"].data);
+				if alloc { defer bytes.buffer_destroy(R_buf); }
+			}
+			if have_G {
+				G, G_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["G"].data);
+				if alloc { defer bytes.buffer_destroy(G_buf); }
+			}
+			if have_B {
+				B, B_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["B"].data);
+				if alloc { defer bytes.buffer_destroy(B_buf); }
+			}
+			if have_A {
+				A, A_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["A"].data);
+				if alloc { defer bytes.buffer_destroy(A_buf); }
+			}
+
+			for len(res) > 0 {
+				// TODO: Handle subsampling.
+				if have_R { res[0] = R[0]; R = R[1:]; }
+				if have_G { res[1] = G[0]; G = G[1:]; }
+				if have_B { res[2] = B[0]; B = B[1:]; }
+				if have_A { res[3] = A[0]; A = A[1:]; }
+				res = res[channel_count:];
+			}
+
+		case .f32le:
+			res: []f32;
+			res, buf, e = bytes.buffer_create_of_type(element_count, f32);
+			assert(len(res) == element_count);
 		}
 
 		bytes.buffer_destroy(&img.pixels);
-		img.pixels = buf;
+		img.pixels = buf^;
 	} else {
 		// We don't handle LumaChroma and stuff yet. Return image as-is for now.
 		// We'll make an error for this or add support soon.

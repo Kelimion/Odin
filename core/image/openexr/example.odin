@@ -46,7 +46,7 @@ process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, sk
 }
 
 main :: proc() {
-	when false {
+	when true {
 		when SINGLE {
 			context.user_data = image.Options{};
 			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr";
@@ -149,17 +149,17 @@ write_image_as_ppm :: proc(filename: string, image: ^image.Image) -> (success: b
 
 	img := image;
 
-	// PBM 16-bit images are big endian
-	when ODIN_ENDIAN == "little" {
-		if img.depth == 16 {
-			// The pixel components are in Big Endian. Let's byteswap back.
-			input  := mem.slice_data_cast([]u16,   img.pixels.buf[:]);
-			output := mem.slice_data_cast([]u16be, img.pixels.buf[:]);
-			#no_bounds_check for v, i in input {
-				output[i] = u16be(v);
-			}
-		}
-	}
+	// // PBM 16-bit images are big endian
+	// when ODIN_ENDIAN == "little" {
+	// 	if img.depth == 16 {
+	// 		// The pixel components are in Big Endian. Let's byteswap back.
+	// 		input  := mem.slice_data_cast([]u16,   img.pixels.buf[:]);
+	// 		output := mem.slice_data_cast([]u16be, img.pixels.buf[:]);
+	// 		#no_bounds_check for v, i in input {
+	// 			output[i] = u16be(v);
+	// 		}
+	// 	}
+	// }
 
 	pix := bytes.buffer_to_bytes(&img.pixels);
 
