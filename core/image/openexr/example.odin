@@ -64,7 +64,7 @@ main :: proc() {
 		fmt.println("Convert []f16le (x2) to []f32 (x2).");
 		b := []u8{0, 60, 0, 60}; // f16{1.0, 1.0}
 
-		res, backing, had_to_allocate, err := convert_buffer_of_type(2, f32, f16le, b);
+		res, backing, had_to_allocate, err := bytes.buffer_convert_to_type(2, f32, f16le, b);
 		fmt.printf("res      : %v\n", res);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
@@ -75,7 +75,7 @@ main :: proc() {
 		fmt.println("\nConvert []f16le (x2) to []u16 (x2).");
 
 		res2: []u16;
-		res2, backing, had_to_allocate, err = convert_buffer_of_type(2, u16, f16le, b);
+		res2, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, u16, f16le, b);
 		fmt.printf("res      : %v\n", res2);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
@@ -85,7 +85,7 @@ main :: proc() {
 
 		fmt.println("\nConvert []f16le (x2) to []u16 (x2), force_convert=true.");
 
-		res2, backing, had_to_allocate, err = convert_buffer_of_type(2, u16, f16le, b, true);
+		res2, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, u16, f16le, b, true);
 		fmt.printf("res      : %v\n", res2);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
@@ -94,7 +94,7 @@ main :: proc() {
 		if had_to_allocate { defer bytes.buffer_destroy(backing); }		
 
 		fmt.println("\nAllocate a new buffer with create_buffer_of_type.");
-		res, backing, err = create_buffer_of_type(2, f32);
+		res, backing, err = bytes.buffer_create_of_type(2, f32);
 		fmt.printf("res      : %v\n", res);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
@@ -105,7 +105,7 @@ main :: proc() {
 		fmt.println("\nAllocate a new buffer with convert_buffer_of_type by passing an empty buffer.");
 		b = []u8{}; // Empty so that we allocate. From type is ignored.
 
-		res, backing, had_to_allocate, err = convert_buffer_of_type(2, f32, f32, b);
+		res, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, f32, f32, b);
 		fmt.printf("res      : %v\n", res);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
