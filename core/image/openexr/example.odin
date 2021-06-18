@@ -61,13 +61,36 @@ main :: proc() {
 			filepath.walk("W:\\compress-odin\\test\\OpenEXR test suite", process_file);
 		}
 	} else {
-		b := []u8{0, 60, 0, 60};
+		fmt.println("Convert []f16le (x2) to []f32 (x2).");
+		b := []u8{0, 60, 0, 60}; // f16{1.0, 1.0}
 
-		res, backing, had_to_allocate, err := make_buffer_of_type(2, f16le, f16, b);
+		res, backing, had_to_allocate, err := convert_buffer_of_type(2, f32, f16le, b);
 		fmt.printf("res      : %v\n", res);
 		fmt.printf("backing  : %v\n", backing);
 		fmt.printf("allocated: %v\n", had_to_allocate);
 		fmt.printf("err      : %v\n", err);
+
+		if had_to_allocate { defer bytes.buffer_destroy(backing); }
+
+		fmt.println("\nAllocate a new buffer with create_buffer_of_type.");
+		res, backing, err = create_buffer_of_type(2, f32);
+		fmt.printf("res      : %v\n", res);
+		fmt.printf("backing  : %v\n", backing);
+		fmt.printf("allocated: %v\n", had_to_allocate);
+		fmt.printf("err      : %v\n", err);
+
+		if had_to_allocate { defer bytes.buffer_destroy(backing); }
+
+		fmt.println("\nAllocate a new buffer with convert_buffer_of_type by passing an empty buffer.");
+		b = []u8{}; // Empty so that we allocate. From type is ignored.
+
+		res, backing, had_to_allocate, err = convert_buffer_of_type(2, f32, f32, b);
+		fmt.printf("res      : %v\n", res);
+		fmt.printf("backing  : %v\n", backing);
+		fmt.printf("allocated: %v\n", had_to_allocate);
+		fmt.printf("err      : %v\n", err);
+
+		if had_to_allocate { defer bytes.buffer_destroy(backing); }
 	}
 }
 

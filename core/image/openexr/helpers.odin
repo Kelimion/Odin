@@ -191,27 +191,28 @@ need_endian_conversion :: proc($FT: typeid, $TT: typeid) -> (res: bool) {
 	return;
 }
 
-make_buffer_of_type :: proc(count: int, $FT: typeid, $TT: typeid, from_buffer: []u8) -> (
+convert_buffer_of_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer: []u8) -> (
 	res: []TT, backing: ^bytes.Buffer, alloc: bool, err: bool) {
 
 	backing = new(bytes.Buffer);
 
-	if FT == TT {
-		res = mem.slice_data_cast([]TT, from_buffer);
-		bytes.buffer_init(backing, from_buffer);
-		if len(res) != count {
-			err = true;
-		}
-		return;
-	}
-
 	if len(from_buffer) > 0 {
 		/*
-			Check if we've been given enough input elements
+			Check if we've been given enough input elements.
 		*/
 		from := mem.slice_data_cast([]FT, from_buffer);
 		if len(from) != count {
 			err = true;
+			return;
+		}
+
+		/*
+			We can early out if the types are exactly identical.
+			This needs to be `when`, or res = from will fail if the types are different.
+		*/
+		when FT == TT {
+			res = from;
+			bytes.buffer_init(backing, from_buffer);
 			return;
 		}
 
@@ -231,11 +232,51 @@ make_buffer_of_type :: proc(count: int, $FT: typeid, $TT: typeid, from_buffer: [
 			}
 			return;
 		} else {
-			// Do endianness and/or size_of conversion
+			if (size_of(TT) * count == len(from_buffer)) {
+				/*
+					Same size, can do an in-place Endianness conversion.
+				*/
+				res  = mem.slice_data_cast([]TT, from_buffer);
+				bytes.buffer_init(backing, from_buffer);
+				for v, i in from {
+					res[i] = TT(v);
+				}
+			} else {
+				/*
+					Result is a different size, we need to allocate an output buffer.
+				*/
+				size := size_of(TT) * count;
+				bytes.buffer_init_allocator(backing, size, size, context.allocator);
+				alloc = true;
+				res   = mem.slice_data_cast([]TT, backing.buf[:]);
+				if len(res) != count {
+					err = true;
+					return;
+				}
+
+				for v, i in from {
+					res[i] = TT(v);
+				}
+			}
 		}
 	} else {
-		// Create new buffer
+		/*
+			The input buffer is empty, so we'll have to create a new one for []TT of length count.
+		*/
+		res, backing, err = create_buffer_of_type(count, TT);
+		alloc = true;
 	}
 
+	return;
+}
+
+create_buffer_of_type :: proc(count: int, $TT: typeid) -> (res: []TT, backing: ^bytes.Buffer, err: bool) {
+	backing = new(bytes.Buffer);
+	size := size_of(TT) * count;
+	bytes.buffer_init_allocator(backing, size, size, context.allocator);
+	res   = mem.slice_data_cast([]TT, backing.buf[:]);
+	if len(res) != count {
+		err = true;
+	}
 	return;
 }
