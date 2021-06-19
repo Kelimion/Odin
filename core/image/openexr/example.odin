@@ -37,6 +37,7 @@ process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, sk
 				img.width, img.height, img.channels, img.depth,
 				info.type, info.compression,
 			);
+
 			if !(.info in options || .do_not_decompress_image in options) {
 				remap(img);
 			}
@@ -49,8 +50,8 @@ main :: proc() {
 	when true {
 		when SINGLE {
 			context.user_data = image.Options{};
-			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr";
-			// filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr";
+			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr"; // RGB f16, ZIP, scanline
+			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr"; // RGB f16, ZIP, tiled
 			// filename = "W:\\compress-odin\\test\\OpenEXR test suite\\Beachball\\multipart.0001.exr";
 			// filename = "W:\\compress-odin\\test\\OpenEXR test suite\\v2\\LowResLeftView\\composited.exr";
 

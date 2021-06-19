@@ -16,7 +16,6 @@ import "core:strings"
 // import "core:hash"
 import "core:bytes"
 import "core:io"
-import "core:mem"
 import "core:intrinsics"
 import "core:fmt"
 
@@ -447,13 +446,13 @@ load_from_stream__extended :: proc(stream: io.Stream, options := Options{}, allo
 	}
 
 	if img == nil {
-		img = new(Image);
+		img = new(Image, context.allocator);
 	}
 
 	intern := new(strings.Intern);
 	strings.intern_init(intern);
 
-	info := new(Info);
+	info := new(Info, context.allocator);
 	info.intern = intern;
 	img.sidecar = info;
 
@@ -837,7 +836,7 @@ zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Vers
 	io_err: io.Error;
 
 	info := img.sidecar.(^Info);
-	num_channels := len(info.channels);
+	// num_channels := len(info.channels);
 
 	written := 0;
 	y_min := info.data_window.y_min;
@@ -848,7 +847,7 @@ zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Vers
 		size:   u8, // Per element/pixel
 		stride: int,
 	};
-	components := make([dynamic]Component, num_channels);
+	components := make([dynamic]Component);
 	defer delete(components);
 
 	for _, ch in info.channels {
@@ -966,20 +965,7 @@ zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Vers
 zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Version_Flags, tiledesc: Tile_Desc) -> (err: Error) {
 	io_err: io.Error;
 
-	info := img.sidecar.(^Info);
-
 	fmt.printf("TD: %v\n", tiledesc);
-	fmt.printf("Depth: %v\n", img.depth);
-
-	output := bytes.buffer_to_bytes(&img.pixels);
-
-	written := 0;
-	y_min   := int(info.data_window.y_min);
-
-	r, e1 := io.to_reader(ctx.input);
-	if !e1 {
-		return E_EXR.Corrupt;
-	}
 
 	Tile_Coord :: struct {
 		x_coord: i32le,
@@ -988,6 +974,37 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 		y_level: i32le,
 	};
 	#assert(size_of(Tile_Coord) == 16);
+
+	info := img.sidecar.(^Info);
+
+	written := 0;
+
+	Component :: struct{
+		data:   []u8,
+		skip:   bool,
+		size:   u8, // Per element/pixel
+		stride: int,
+	};
+	components := make([dynamic]Component);
+	defer delete(components);
+
+	for _, ch in info.channels {
+		component := Component{
+			data = ch.data,
+			skip = ch.skip,
+			size = ch.pixel_size,
+			// For tiles this has to be recalculated each tile, as width can change on the edges.
+			stride = int(ch.pixel_size) * int(tiledesc.x_size),
+		};
+		append(&components, component);
+	}
+
+	r, e1 := io.to_reader(ctx.input);
+	if !e1 {
+		return E_EXR.Corrupt;
+	}
+
+	buf: ^bytes.Buffer;
 
 	for ci := 0; ci < chunk_count; ci += 1 {
 		part_number: i32le;
@@ -999,8 +1016,8 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 			fmt.printf("Part: %v\n", part_number);
 		}
 
-		coord: Tile_Coord;
-		coord, io_err = compress.read_data(ctx, Tile_Coord);
+		tile: Tile_Coord;
+		tile, io_err = compress.read_data(ctx, Tile_Coord);
 		if io_err != .None {
 			return E_EXR.Corrupt;
 		}
@@ -1010,64 +1027,33 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 		if io_err != .None {
 			return E_EXR.Corrupt;
 		}
+		/*
+			We only care about max quality tiles.
+		*/
+		if tile.x_level == 0 && tile.y_level == 0 {
+			// ZLIB could read directly from the stream if we wanted to.
+			b := make([]u8, i64(chunk_size), context.temp_allocator);
+			_, e2 := io.read(r, b);
+			if e2 != .None {
+				return E_EXR.Corrupt;	
+			}
 
-		// ZLIB could read directly from the stream if we wanted to.
-		b := make([]u8, i64(chunk_size), context.temp_allocator);
-		_, e2 := io.read(r, b);
-		if e2 != .None {
-			return E_EXR.Corrupt;	
-		}
-
-		// img.width  = 128;
-		// img.height = 128 * 5;
-		if coord.x_coord != 0 || coord.x_level > 0 { // || coord.y_coord > 4 {
-			//return nil;
+			buf = new(bytes.Buffer);
+			zlib_err := zlib.inflate(b, buf);
+			if zlib_err != nil {
+				bytes.buffer_destroy(buf);
+				return E_EXR.Corrupt;
+			}
+		} else {
+			// Seek past compressed data
+			ctx.input->impl_seek(i64(chunk_size), .Current);
 			continue;
 		}
 
-		fmt.printf("Tile: %v\n", coord);
+		raw := bytes.buffer_to_bytes(buf);
+		defer bytes.buffer_destroy(buf);
 
-		buf: bytes.Buffer;
-		zlib_err := zlib.inflate(b, &buf);
-		defer bytes.buffer_destroy(&buf);
-
-		if zlib_err != nil {
-			return E_EXR.Corrupt;
-		}
-
-		raw := bytes.buffer_to_bytes(&buf);
 		length := len(raw);
-
-		tile_bounds := [4]int{
-			int(coord.x_coord),
-			int(coord.y_coord),
-			int(coord.x_coord) + 1,
-			int(coord.y_coord) + 1,
-		};
-		tile_bounds.xz *= int(tiledesc.x_size);
-		tile_bounds.yw *= int(tiledesc.y_size);
-
-		if tile_bounds.z > img.width {
-			tile_bounds.z = tile_bounds.x + img.width  % int(tiledesc.x_size);
-		}
-		if tile_bounds.w > img.height {
-			tile_bounds.w = tile_bounds.y + img.height % int(tiledesc.y_size);
-		}
-
-		fmt.printf("Tile Bounds: %v\n", tile_bounds);
-
-		// This should work for INCREASING_Y, DECREASING_Y and RANDOM_Y scanline ordering.
-
-		row_stride    := image.compute_buffer_size(img.width,     1, 1, img.depth);
-		tile_width    := tile_bounds.z - tile_bounds.x;
-		tile_stride   := image.compute_buffer_size(tile_width,    1, 1, img.depth);
-		column_offset := image.compute_buffer_size(tile_bounds.x, 1, 1, img.depth);
-
-		y := (tile_bounds.y - y_min);
-
-		offset := y * row_stride + column_offset;
-		fmt.printf("Column Offset: %v | Tile Width: %v | Tile Stride: %v | Row Stride: %v | Offset: %v\n", column_offset, tile_width, tile_stride, row_stride, offset);
-
 		p := u16(raw[0]);
 		for j := 1; j < length; j += 1 {
 			p += u16(raw[j]);
@@ -1078,31 +1064,60 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 		half := (length + 1) / 2;
 		deinterleaved := soa_zip(odd=raw[:length-half], even=raw[half:]);
 
-		c := 0;
+		/*
+			TODO: We could make a buffer once at the start of the proc if we calculate the max chunk size.
+		*/
 
+		temp: bytes.Buffer;
+		bytes.buffer_init_allocator(&temp, length, length, context.allocator);
+		defer bytes.buffer_destroy(&temp);
+		t := bytes.buffer_to_bytes(&temp);
+
+		i := 0;
 		for v in deinterleaved {
-			output[offset + c    ] = v.odd;
-			output[offset + c + 1] = v.even;
-			c += 2;
-			if c >= tile_stride {
-				c = 0;
-				y += 1;
-				offset = y * row_stride + column_offset;
-			}
-		}
-		if length & 1 == 1 {
-			// Handle odd number of bytes.
-			output[offset] = raw[length - 1];	
+			t[i]     = v.odd;
+			t[i + 1] = v.even;
+			i += 2;
 		}
 
-		written += length;
+		y_coord := int(tile.y_coord    ) * int(tiledesc.y_size);
+		x_coord := int(tile.x_coord    ) * int(tiledesc.x_size);
+		x_max   := int(tile.x_coord + 1) * int(tiledesc.x_size);
+
+		overlap := 0;
+		if img.width < x_max {
+			overlap = img.width % int(tiledesc.x_size);
+		}
+
+		offset := 0;
+		for len(t) > 0 {
+			for comp in components {
+				stride := comp.stride;
+				if overlap > 0 {
+					// Tile straddles the edge of the image. Update stride.
+					stride = int(comp.size) * overlap;
+				}
+				offset = ((y_coord * img.width) + x_coord) * int(comp.size);
+
+				if !comp.skip {
+					copy(comp.data[offset:], t[:stride]);
+				}
+				t = t[stride:];
+				written += stride;
+			}
+			/*
+				INCREASING_Y, DECREASING_Y and RANDOM_Y is about the order chunks appear in.
+				Scanlines within a chunk are in increasing order, so we can just do this.
+			*/
+			y_coord += 1;
+		}
 	}
 
-	fmt.println("Decompressed image.");
+	assert(written == len(img.pixels.buf));
+	fmt.println("\nDecompressed image.");
 
 	return nil;
 }
-
 
 /*
 	RGB(A) interfaces follow
@@ -1161,6 +1176,9 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 	}
 
 	info := img.sidecar.(^Info);
+	// Hack, because for some reason this otherwise goes out of scope and contains garbage by the time we return to main().
+	img.sidecar = info;
+
 	channels := info.channels;
 
 	buf: ^bytes.Buffer;
@@ -1260,19 +1278,23 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 
 			if have_R {
 				R, R_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["R"].data);
-				if alloc { defer bytes.buffer_destroy(R_buf); }
+				d := alloc;
+				defer if d { bytes.buffer_destroy(R_buf); }
 			}
 			if have_G {
 				G, G_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["G"].data);
-				if alloc { defer bytes.buffer_destroy(G_buf); }
+				d := alloc;
+				defer if d { bytes.buffer_destroy(G_buf); }
 			}
 			if have_B {
 				B, B_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["B"].data);
-				if alloc { defer bytes.buffer_destroy(B_buf); }
+				d := alloc;
+				defer if d { bytes.buffer_destroy(B_buf); }
 			}
 			if have_A {
 				A, A_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["A"].data);
-				if alloc { defer bytes.buffer_destroy(A_buf); }
+				d := alloc;
+				defer if d { bytes.buffer_destroy(A_buf); }
 			}
 
 			for len(res) > 0 {
@@ -1283,7 +1305,6 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 				if have_A { res[3] = A[0]; A = A[1:]; }
 				res = res[channel_count:];
 			}
-
 		case .f32le:
 			res: []f32;
 			res, buf, e = bytes.buffer_create_of_type(element_count, f32);
