@@ -50,10 +50,10 @@ main :: proc() {
 	when true {
 		when SINGLE {
 			context.user_data = image.Options{};
-			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr"; // RGB f16, ZIP, scanline
-			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr"; // RGB f16, ZIP, tiled
-			// filename = "W:\\compress-odin\\test\\OpenEXR test suite\\Beachball\\multipart.0001.exr";
-			// filename = "W:\\compress-odin\\test\\OpenEXR test suite\\v2\\LowResLeftView\\composited.exr";
+			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr";    // RGB f16, ZIP, scanline
+			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr";        // RGB f16, ZIP, tiled
+			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\Beachball\\multipart.0001.exr";      // RGBA f16, ZIPS, multi
+			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\v2\\LowResLeftView\\composited.exr"; // RGBA f16, ZIPS
 
 			file, _ := os.stat(filename);
 			process_file(file, os.Errno{});

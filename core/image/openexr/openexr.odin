@@ -813,7 +813,8 @@ load_from_stream__extended :: proc(stream: io.Stream, options := Options{}, allo
 		fmt.printf("%v) offset: %v, length: %v, ps: %v\n", ch.name, ch_off, length, ch.pixel_size);
 		ch_off += length;
 	}
-	assert (ch_off == pixel_buffer_size);
+
+	assert(ch_off == pixel_buffer_size);
 
 	#partial switch(info.compression) {
 	case .ZIP, .ZIPS:
@@ -881,7 +882,8 @@ zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Vers
 		if io_err != .None {
 			return E_EXR.Corrupt;
 		}
-		// fmt.printf("Y: %v | ", y_coord);
+
+		// TODO: check that coords are within extents and return an error otherwise.
 
 		chunk_size: i32le;
 		chunk_size, io_err = compress.read_data(ctx, i32le);
@@ -1083,6 +1085,8 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 		y_coord := int(tile.y_coord    ) * int(tiledesc.y_size);
 		x_coord := int(tile.x_coord    ) * int(tiledesc.x_size);
 		x_max   := int(tile.x_coord + 1) * int(tiledesc.x_size);
+
+		// TODO: check that coords are within extents and return an error otherwise.
 
 		overlap := 0;
 		if img.width < x_max {
