@@ -62,9 +62,64 @@ remap :: proc(img: ^Image) {
 		// return T(math.remap(c, 0.0, 1.0, 0.0, 255.0));
 	}
 
-	floats := mem.slice_data_cast([]f16le, img.pixels.buf[:]);
+	floats := mem.slice_data_cast([]f16, img.pixels.buf[:]);
 
-	h := [2]f16le{};
+	h := [2]f16{};
+	for p in floats {
+		if !math.is_inf(f16(p)) {
+			h[0] = p < h[0] ? p : h[0];
+			h[1] = p > h[1] ? p : h[1];
+		}
+	}
+	fmt.printf("min: %v, max: %v, range: %v\n", h[0], h[1], h[1] - h[0]);
+
+	out: []u8;
+	output: ^bytes.Buffer;
+	err: bool;
+
+	img.depth = 8;
+	pixels   := img.width * img.height;
+	elements := pixels * img.channels;
+
+	out, output, err = bytes.buffer_create_of_type(elements, u8);
+
+	fmt.printf("Created buffer of size %v for remapped image.\n", elements);
+
+	for len(floats) > 0 {
+		c := do_clamp(floats[0], h[0], h[1]);
+		out[0] = u8(c); out = out[1:];
+		floats = floats[1:];
+	}
+
+	fmt.printf("%v floats left.\n", len(floats));
+
+	bytes.buffer_destroy(&img.pixels);
+	img.pixels = output^;
+
+	if ok := write_image_as_ppm("out.ppm", img); ok {
+		fmt.println("Saved decoded image.");
+	} else {
+		fmt.println("Error saving out.ppm.");
+	}
+}
+
+remap__extended :: proc(img: ^Image) {
+
+	if len(img.pixels.buf[:]) == 0 do return;
+
+	do_clamp :: proc(v, min, max: $T) -> (res: T) {
+		c: = f64(v);
+		if c < 0.0 do c = 0.0;
+		if c > 1.0 do c = 1.0;
+
+		return T(c * 255.0);
+
+		// return T(math.remap(c, 0.0, 1.0, 0.0, 255.0));
+	}
+
+	floats := mem.slice_data_cast([]f16, img.pixels.buf[:]);
+
+	h := [2]f16{};
 	for p in floats {
 		if !math.is_inf(f16(p)) {
 			h[0] = p < h[0] ? p : h[0];
@@ -76,8 +131,6 @@ remap :: proc(img: ^Image) {
 	output: bytes.Buffer;
 	img.depth    = 8;
 	img.channels = 3;
-
-	fmt.printf("x: %v, y: %v, c: %v: d: %v\n", img.width, img.height, img.channels, img.depth);
 
 	pixel_buffer_size := image.compute_buffer_size(img.width, img.height, img.channels, img.depth);
 	bytes.buffer_init_allocator(&output, pixel_buffer_size, pixel_buffer_size);
@@ -125,9 +178,7 @@ remap :: proc(img: ^Image) {
 		fmt.println("Saved decoded image.");
 	} else {
 		fmt.println("Error saving out.ppm.");
-	// fmt.println(img);
 	}
-
 }
 
 
