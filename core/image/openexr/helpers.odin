@@ -20,7 +20,7 @@ import "core:intrinsics"
 	Those are named *_destroy, where * is the name of the helper.
 */
 
-destroy_image :: proc(img: ^Image) {
+destroy_image :: proc(img: ^image.Image) {
 	fmt.println("Destroying Image.");
 	if img == nil {
 		/*
@@ -102,85 +102,6 @@ remap :: proc(img: ^Image) {
 		fmt.println("Error saving out.ppm.");
 	}
 }
-
-remap__extended :: proc(img: ^Image) {
-
-	if len(img.pixels.buf[:]) == 0 do return;
-
-	do_clamp :: proc(v, min, max: $T) -> (res: T) {
-		c: = f64(v);
-		if c < 0.0 do c = 0.0;
-		if c > 1.0 do c = 1.0;
-
-		return T(c * 255.0);
-
-		// return T(math.remap(c, 0.0, 1.0, 0.0, 255.0));
-	}
-
-	floats := mem.slice_data_cast([]f16, img.pixels.buf[:]);
-
-	h := [2]f16{};
-	for p in floats {
-		if !math.is_inf(f16(p)) {
-			h[0] = p < h[0] ? p : h[0];
-			h[1] = p > h[1] ? p : h[1];
-		}
-	}
-	fmt.printf("min: %v, max: %v, range: %v\n", h[0], h[1], h[1] - h[0]);
-
-	output: bytes.Buffer;
-	img.depth    = 8;
-	img.channels = 3;
-
-	pixel_buffer_size := image.compute_buffer_size(img.width, img.height, img.channels, img.depth);
-	bytes.buffer_init_allocator(&output, pixel_buffer_size, pixel_buffer_size);
-	fmt.printf("Created buffer of size %v for remapped image.\n", pixel_buffer_size);
-
-	out := bytes.buffer_to_bytes(&output);
-	idx := 0;
-
-	for y := 0; y < img.height; y += 1 {
-		// idx = (y * img.width * img.channels) + 3;
-		// for x := 0; x < img.width; x += 1 {
-		// 	c := clamp(floats[0], 0.0, 1.0) * 255.0;
-		// 	out[idx] = u8(c); idx += img.channels;
-		// 	floats = floats[1:];
-		// }
-		// fmt.printf("Y: %v\n", y);
-
-		idx = (y * img.width * img.channels) + 2;
-		for w := 0; w < img.width; w += 1 {
-			c := do_clamp(floats[0], h[0], h[1]);
-			out[idx] = u8(c); idx += img.channels;
-			floats = floats[1:];
-		}
-
-		idx = (y * img.width * img.channels) + 1;
-		for w := 0; w < img.width; w += 1 {
-			c := do_clamp(floats[0], h[0], h[1]);
-			out[idx] = u8(c); idx += img.channels;
-			floats = floats[1:];
-		}
-
-		idx = (y * img.width * img.channels) + 0;
-		for w := 0; w < img.width; w += 1 {
-			c := do_clamp(floats[0], h[0], h[1]);
-			out[idx] = u8(c); idx += img.channels;
-			floats = floats[1:];
-		}
-	}
-	fmt.printf("%v floats left.\n", len(floats));
-
-	bytes.buffer_destroy(&img.pixels);
-	img.pixels = output;
-
-	if ok := write_image_as_ppm("out.ppm", img); ok {
-		fmt.println("Saved decoded image.");
-	} else {
-		fmt.println("Error saving out.ppm.");
-	}
-}
-
 
 num_tiles :: proc(width, height: int, tiledesc: Tile_Desc) -> (tiles: int) {
 	/*
