@@ -1,18 +1,24 @@
 package openexr
 
+/*
+	Copyright 2021 Jeroen van Rijn <nom@duclavier.com>.
+	Made available under Odin's BSD-2 license.
+
+	List of contributors:
+		Jeroen van Rijn: Initial implementation.
+
+	These are a few useful utility functions to work with OpenEXR files.
+*/
+
 import "core:image"
 // import "core:compress/zlib"
 // import coretime "core:time"
-// import "core:strings"
+import "core:strings"
 import "core:bytes"
 import "core:fmt"
 import "core:mem"
 import "core:math"
 import "core:intrinsics"
-
-/*
-	These are a few useful utility functions to work with OpenEXR images.
-*/
 
 /*
 	Cleanup of image-specific data.
@@ -30,15 +36,16 @@ destroy_image :: proc(img: ^image.Image) {
 		return;
 	}
 
+	v: ^Info;
+	if img.metadata_ptr != nil && img.metadata_type == Info {
+		v = (^Info)(img.metadata_ptr);
+		delete(v.channels);
+		delete(v.channel_order);
+		strings.intern_destroy(v.intern);
+		free(v.intern);
+		free(v);
+	}
 	bytes.buffer_destroy(&img.pixels);
-
-	// if v, ok := img.sidecar.(^Info); ok {
-	//  delete the channel map and channel order array
-	// 	strings.intern_destroy(v.intern);
-	// 	free(v.intern);
-	// 	free(v);
-	// }
-
 	free(img);
 }
 

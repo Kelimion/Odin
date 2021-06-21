@@ -1,6 +1,16 @@
 //+ignore
 package openexr
 
+/*
+	Copyright 2021 Jeroen van Rijn <nom@duclavier.com>.
+	Made available under Odin's BSD-2 license.
+
+	List of contributors:
+		Jeroen van Rijn: Initial implementation.
+
+	An example of how to use OpenEXR.
+*/
+
 import "core:compress"
 import "core:image"
 //import "core:image/openexr"
@@ -16,6 +26,8 @@ when !SINGLE {
 	import "core:path/filepath"
 }
 
+when #config(TRACY_ENABLE, false) { import tracy "shared:odin-tracy" }
+
 process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, skip_dir: bool) {
 	options :=  context.user_data.(image.Options);
 	load_err:	compress.Error;
@@ -25,99 +37,63 @@ process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, sk
 		file :=  info.fullpath;
 
 		fmt.printf("Checking OpenEXR file: %v\n", file);
-		img, load_err = load(file, options);
-		defer destroy(img);
+		{
 
-		if load_err != nil {
-			fmt.printf("Returned error: %v\n", load_err);
-		} else {
-			info: ^Info;
-
-			if img.metadata_ptr != nil && img.metadata_type == Info {
-				info = (^Info)(img.metadata_ptr);
-				fmt.printf(
-					"Image: %vx%vx%v, %v-bit (type: %v, compression: %v)\n",
-					img.width, img.height, img.channels, img.depth,
-					info.type, info.compression,
-				);				
+			when #config(TRACY_ENABLE, false) {
+				// Track heap allocations with Tracy for this context.
+				context.allocator = tracy.TrackedAllocator(
+					self              = &tracy.TrackedAllocatorData{},
+					callstack_enable  = true,
+					callstack_size    = 5,
+					backing_allocator = context.allocator,
+				);
+				tracy.ZoneN("Load EXR extended.");
 			}
 
-			if !(.info in options || .do_not_decompress_image in options) {
-				remap(img);
+			img, load_err = load(file, options);
+			defer destroy(img);
+
+			if load_err != nil {
+				fmt.printf("Returned error: %v\n", load_err);
+			} else {
+				info: ^Info;
+
+				if img.metadata_ptr != nil && img.metadata_type == Info {
+					info = (^Info)(img.metadata_ptr);
+					fmt.printf(
+						"Image: %vx%vx%v, %v-bit (type: %v, compression: %v)\n",
+						img.width, img.height, img.channels, img.depth,
+						info.type, info.compression,
+					);				
+				}
+
+				if !(.info in options || .do_not_decompress_image in options) {
+					remap(img);
+				}
 			}
 		}
 	}
 	return;
 }
 
-main :: proc() {
-	when true {
-		when SINGLE {
-			context.user_data = image.Options{};
-			filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr";    // RGB f16, ZIP, scanline
-			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr";        // RGB f16, ZIP, tiled
-			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\Beachball\\multipart.0001.exr";      // RGBA f16, ZIPS, multi
-			filename = "W:\\compress-odin\\test\\OpenEXR test suite\\v2\\LowResLeftView\\composited.exr"; // RGBA f16, ZIPS
+demo :: proc() {
+	when SINGLE {
+		context.user_data = image.Options{};
+		filename := "W:\\compress-odin\\test\\OpenEXR test suite\\TestImages\\WideColorGamut.exr";    // RGB f16, ZIP, scanline
+		filename = "W:\\compress-odin\\test\\OpenEXR test suite\\MultiResolution\\Bonita.exr";        // RGB f16, ZIP, tiled
+		filename = "W:\\compress-odin\\test\\OpenEXR test suite\\Beachball\\multipart.0001.exr";      // RGBA f16, ZIPS, multi
+		filename = "W:\\compress-odin\\test\\OpenEXR test suite\\v2\\LowResLeftView\\composited.exr"; // RGBA f16, ZIPS
 
-			file, _ := os.stat(filename);
-			process_file(file, os.Errno{});
-		} else {
-			context.user_data = image.Options{.info};
-			filepath.walk("W:\\compress-odin\\test\\OpenEXR test suite", process_file);
-		}
+		file, _ := os.stat(filename);
+		process_file(file, os.Errno{});
 	} else {
-		fmt.println("Convert []f16le (x2) to []f32 (x2).");
-		b := []u8{0, 60, 0, 60}; // f16{1.0, 1.0}
-
-		res, backing, had_to_allocate, err := bytes.buffer_convert_to_type(2, f32, f16le, b);
-		fmt.printf("res      : %v\n", res);
-		fmt.printf("backing  : %v\n", backing);
-		fmt.printf("allocated: %v\n", had_to_allocate);
-		fmt.printf("err      : %v\n", err);
-
-		if had_to_allocate { defer bytes.buffer_destroy(backing); }
-
-		fmt.println("\nConvert []f16le (x2) to []u16 (x2).");
-
-		res2: []u16;
-		res2, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, u16, f16le, b);
-		fmt.printf("res      : %v\n", res2);
-		fmt.printf("backing  : %v\n", backing);
-		fmt.printf("allocated: %v\n", had_to_allocate);
-		fmt.printf("err      : %v\n", err);
-
-		if had_to_allocate { defer bytes.buffer_destroy(backing); }
-
-		fmt.println("\nConvert []f16le (x2) to []u16 (x2), force_convert=true.");
-
-		res2, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, u16, f16le, b, true);
-		fmt.printf("res      : %v\n", res2);
-		fmt.printf("backing  : %v\n", backing);
-		fmt.printf("allocated: %v\n", had_to_allocate);
-		fmt.printf("err      : %v\n", err);
-
-		if had_to_allocate { defer bytes.buffer_destroy(backing); }		
-
-		fmt.println("\nAllocate a new buffer with create_buffer_of_type.");
-		res, backing, err = bytes.buffer_create_of_type(2, f32);
-		fmt.printf("res      : %v\n", res);
-		fmt.printf("backing  : %v\n", backing);
-		fmt.printf("allocated: %v\n", had_to_allocate);
-		fmt.printf("err      : %v\n", err);
-
-		if had_to_allocate { defer bytes.buffer_destroy(backing); }
-
-		fmt.println("\nAllocate a new buffer with convert_buffer_of_type by passing an empty buffer.");
-		b = []u8{}; // Empty so that we allocate. From type is ignored.
-
-		res, backing, had_to_allocate, err = bytes.buffer_convert_to_type(2, f32, f32, b);
-		fmt.printf("res      : %v\n", res);
-		fmt.printf("backing  : %v\n", backing);
-		fmt.printf("allocated: %v\n", had_to_allocate);
-		fmt.printf("err      : %v\n", err);
-
-		if had_to_allocate { defer bytes.buffer_destroy(backing); }
+		context.user_data = image.Options{.info};
+		filepath.walk("W:\\compress-odin\\test\\OpenEXR test suite", process_file);
 	}
+}
+
+main :: proc() {
+	demo();
 }
 
 // Crappy PPM writer used during testing. Don't use in production.

@@ -1,6 +1,12 @@
 package openexr
 
 /*
+	Copyright 2021 Jeroen van Rijn <nom@duclavier.com>.
+	Made available under Odin's BSD-2 license.
+
+	List of contributors:
+		Jeroen van Rijn: Initial implementation.
+
 	This code implements support for OpenEXR file format 2.0,
 	as specified in https://www.openexr.com/documentation/openexrfilelayout.pdf
 */
@@ -18,6 +24,8 @@ import "core:bytes"
 import "core:io"
 import "core:intrinsics"
 import "core:fmt"
+
+when #config(TRACY_ENABLE, false) { import tracy "shared:odin-tracy" }
 
 when true {
 	printf :: fmt.printf;
@@ -837,6 +845,8 @@ load_from_stream__extended :: proc(stream: io.Stream, options := Options{}, allo
 }
 
 zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Version_Flags) -> (err: Error) {
+	when #config(TRACY_ENABLE, false) { tracy.ZoneN("ZIP(S) decompression."); }
+
 	io_err: io.Error;
 
 	info := (^Info)(img.metadata_ptr);
@@ -902,13 +912,14 @@ zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Vers
 		}
 
 		buf: bytes.Buffer;
-		zlib_err := zlib.inflate(b, &buf);
-		defer bytes.buffer_destroy(&buf);
-
-		if zlib_err != nil {
-			return E_EXR.Corrupt;
+		{
+			when #config(TRACY_ENABLE, false) { tracy.ZoneN("Decompress Chunk"); }
+			zlib_err := zlib.inflate(b, &buf);
+			if zlib_err != nil {
+				return E_EXR.Corrupt;
+			}
 		}
-		fmt.printf(".");
+		defer bytes.buffer_destroy(&buf);
 
 		raw := bytes.buffer_to_bytes(&buf);
 		length := len(raw);
