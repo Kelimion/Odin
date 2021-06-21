@@ -1328,6 +1328,7 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 
 		bytes.buffer_destroy(&img.pixels);
 		img.pixels = buf^;
+		free(buf);
 	} else {
 		// We don't handle LumaChroma and stuff yet. Return image as-is for now.
 		// We'll make an error for this or add support soon.

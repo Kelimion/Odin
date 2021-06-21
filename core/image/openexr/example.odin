@@ -25,6 +25,7 @@ SINGLE :: true;
 when !SINGLE {
 	import "core:path/filepath"
 }
+REPORT_LEAKS :: true;
 
 when #config(TRACY_ENABLE, false) { import tracy "shared:odin-tracy" }
 
@@ -32,6 +33,17 @@ process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, sk
 	options :=  context.user_data.(image.Options);
 	load_err:	compress.Error;
 	img:       ^image.Image;
+
+    track: mem.Tracking_Allocator;
+    mem.tracking_allocator_init(&track, context.allocator);
+    context.allocator = mem.tracking_allocator(&track);
+
+    defer if REPORT_LEAKS && len(track.allocation_map) > 0 {
+        fmt.println("Leak report:");
+        for _, v in track.allocation_map {
+            fmt.printf("\t%v\n", v);
+        }
+    }
 
 	if !info.is_dir && info.name[len(info.name)-4:] == ".exr" {
 		file :=  info.fullpath;

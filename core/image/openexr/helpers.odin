@@ -41,11 +41,13 @@ destroy_image :: proc(img: ^image.Image) {
 		v = (^Info)(img.metadata_ptr);
 		delete(v.channels);
 		delete(v.channel_order);
+		delete(v.attributes);
 		strings.intern_destroy(v.intern);
 		free(v.intern);
 		free(v);
 	}
 	bytes.buffer_destroy(&img.pixels);
+	free(&img.pixels);
 	free(img);
 }
 
@@ -101,6 +103,7 @@ remap :: proc(img: ^Image) {
 	fmt.printf("%v floats left.\n", len(floats));
 
 	bytes.buffer_destroy(&img.pixels);
+	free(&img.pixels);
 	img.pixels = output^;
 
 	if ok := write_image_as_ppm("out.ppm", img); ok {
@@ -108,6 +111,8 @@ remap :: proc(img: ^Image) {
 	} else {
 		fmt.println("Error saving out.ppm.");
 	}
+	bytes.buffer_destroy(output);
+	free(output);
 }
 
 num_tiles :: proc(width, height: int, tiledesc: Tile_Desc) -> (tiles: int) {

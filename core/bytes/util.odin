@@ -34,6 +34,28 @@ need_endian_conversion :: proc($FT: typeid, $TT: typeid) -> (res: bool) {
 	return;
 }
 
+make_raw_buffer_from_slice :: proc(slice: []u8, buf: ^Buffer) {
+	buf := buf;
+	/*
+		This is a "fake" Buffer, backed by the slice pass in.
+		It's not meant to be resized or freed.
+	*/
+	raw := mem.Raw_Dynamic_Array{
+		data      = raw_data(slice),
+		len       = len(slice),
+		cap       = len(slice),
+	};
+
+	t := Buffer{
+		buf       = transmute([dynamic]u8)raw,
+		off       = 0,
+		last_read = nil,
+	};
+	buf = &t;
+
+	return;
+}
+
 /*
 	Input:
 		count:         number of elements
@@ -97,7 +119,7 @@ need_endian_conversion :: proc($FT: typeid, $TT: typeid) -> (res: bool) {
 buffer_convert_to_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer: []u8, force_convert := false) -> (
 	res: []TT, backing: ^Buffer, alloc: bool, err: bool) {
 
-	backing = new(Buffer);
+	alloc = true;
 
 	if len(from_buffer) > 0 {
 		/*
@@ -115,7 +137,8 @@ buffer_convert_to_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer
 		*/
 		when FT == TT {
 			res = from;
-			buffer_init(backing, from_buffer);
+			make_raw_buffer_from_slice(from_buffer, backing);
+			alloc = false;
 			return;
 		}
 
@@ -129,7 +152,8 @@ buffer_convert_to_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer
 		if !convert {
 			// It's just a data cast
 			res = mem.slice_data_cast([]TT, from_buffer);
-			buffer_init(backing, from_buffer);
+			make_raw_buffer_from_slice(from_buffer, backing);
+			alloc = false;
 
 			if len(res) != count {
 				err = true;
@@ -142,7 +166,8 @@ buffer_convert_to_type :: proc(count: int, $TT: typeid, $FT: typeid, from_buffer
 					If `force_convert`, this also handles the per-element cast instead of slice_data_cast.
 				*/
 				res  = mem.slice_data_cast([]TT, from_buffer);
-				buffer_init(backing, from_buffer);
+				make_raw_buffer_from_slice(from_buffer, backing);
+				alloc = false;
 				for v, i in from {
 					res[i] = TT(v);
 				}
