@@ -31,12 +31,16 @@ process_file :: proc(info: os.File_Info, in_err: os.Errno) -> (err: os.Errno, sk
 		if load_err != nil {
 			fmt.printf("Returned error: %v\n", load_err);
 		} else {
-			info := img.sidecar.(^Info);
-			fmt.printf(
-				"Image: %vx%vx%v, %v-bit (type: %v, compression: %v)\n",
-				img.width, img.height, img.channels, img.depth,
-				info.type, info.compression,
-			);
+			info: ^Info;
+
+			if img.metadata_ptr != nil && img.metadata_type == Info {
+				info = (^Info)(img.metadata_ptr);
+				fmt.printf(
+					"Image: %vx%vx%v, %v-bit (type: %v, compression: %v)\n",
+					img.width, img.height, img.channels, img.depth,
+					info.type, info.compression,
+				);				
+			}
 
 			if !(.info in options || .do_not_decompress_image in options) {
 				remap(img);

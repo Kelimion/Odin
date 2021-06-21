@@ -454,7 +454,10 @@ load_from_stream__extended :: proc(stream: io.Stream, options := Options{}, allo
 
 	info := new(Info, context.allocator);
 	info.intern = intern;
-	img.sidecar = info;
+
+	img.metadata_ptr  = info;
+	img.metadata_type = typeid_of(Info);
+
 
 	ctx := compress.Context{
 		input = stream,
@@ -836,7 +839,7 @@ load_from_stream__extended :: proc(stream: io.Stream, options := Options{}, allo
 zip_decompress :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags: Version_Flags) -> (err: Error) {
 	io_err: io.Error;
 
-	info := img.sidecar.(^Info);
+	info := (^Info)(img.metadata_ptr);
 	// num_channels := len(info.channels);
 
 	written := 0;
@@ -977,7 +980,7 @@ zip_decompress_tiled :: proc(img: ^Image, ctx: ^Context, chunk_count: int, flags
 	};
 	#assert(size_of(Tile_Coord) == 16);
 
-	info := img.sidecar.(^Info);
+	info := (^Info)(img.metadata_ptr);
 
 	written := 0;
 
@@ -1179,10 +1182,7 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 		return;
 	}
 
-	info := img.sidecar.(^Info);
-	// Hack, because for some reason this otherwise goes out of scope and contains garbage by the time we return to main().
-	img.sidecar = info;
-
+	info := (^Info)(img.metadata_ptr);
 	channels := info.channels;
 
 	buf: ^bytes.Buffer;
