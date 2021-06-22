@@ -1274,12 +1274,12 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 		switch(pixel_type) {
 		case .u32le:
 			res: []u32;
-			res, buf, e = bytes.buffer_create_of_type(element_count, u32);
+			res, buf, e = buffer_create_of_type(element_count, u32);
 			assert(len(res) == element_count);
 
 		case .f16le:
 			res: []f16;
-			res, buf, e = bytes.buffer_create_of_type(element_count, f16);
+			res, buf, e = buffer_create_of_type(element_count, f16);
 			assert(len(res) == element_count);
 
 			R: []f16;
@@ -1292,22 +1292,22 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 			A_buf: ^bytes.Buffer;
 
 			if have_R {
-				R, R_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["R"].data);
+				R, R_buf, alloc, e = buffer_convert_to_type(pixels, f16, f16le, channels["R"].data);
 				d := alloc;
 				defer if d { bytes.buffer_destroy(R_buf); }
 			}
 			if have_G {
-				G, G_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["G"].data);
+				G, G_buf, alloc, e = buffer_convert_to_type(pixels, f16, f16le, channels["G"].data);
 				d := alloc;
 				defer if d { bytes.buffer_destroy(G_buf); }
 			}
 			if have_B {
-				B, B_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["B"].data);
+				B, B_buf, alloc, e = buffer_convert_to_type(pixels, f16, f16le, channels["B"].data);
 				d := alloc;
 				defer if d { bytes.buffer_destroy(B_buf); }
 			}
 			if have_A {
-				A, A_buf, alloc, e = bytes.buffer_convert_to_type(pixels, f16, f16le, channels["A"].data);
+				A, A_buf, alloc, e = buffer_convert_to_type(pixels, f16, f16le, channels["A"].data);
 				d := alloc;
 				defer if d { bytes.buffer_destroy(A_buf); }
 			}
@@ -1322,7 +1322,7 @@ load_from_stream :: proc(stream: io.Stream, options := Options{}, allocator := c
 			}
 		case .f32le:
 			res: []f32;
-			res, buf, e = bytes.buffer_create_of_type(element_count, f32);
+			res, buf, e = buffer_create_of_type(element_count, f32);
 			assert(len(res) == element_count);
 		}
 

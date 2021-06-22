@@ -90,7 +90,7 @@ remap :: proc(img: ^Image) {
 	pixels   := img.width * img.height;
 	elements := pixels * img.channels;
 
-	out, output, err = bytes.buffer_create_of_type(elements, u8);
+	out, output, err = buffer_create_of_type(elements, u8);
 
 	fmt.printf("Created buffer of size %v for remapped image.\n", elements);
 
