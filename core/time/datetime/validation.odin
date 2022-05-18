@@ -5,8 +5,6 @@ is_leap_year :: proc(year: int) -> (leap: bool) {
 	return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-validate :: proc{validate_date, validate_year_month_day, validate_ordinal}
-
 validate_date :: proc(date: Date) -> (err: Error) {
 	return validate(date.year, date.month, date.day)
 }
@@ -36,4 +34,34 @@ validate_ordinal :: proc(ordinal: Ordinal) -> (err: Error) {
 		return .Invalid_Ordinal
 	}
 	return
+}
+
+validate_time :: proc(time: Time) -> (err: Error) {
+	if time.hour < 0 || time.hour > 23 {
+		return .Invalid_Hour
+	}
+	if time.minute < 0 || time.minute > 59 {
+		return .Invalid_Minute
+	}
+	if time.second < 0 || time.second > 59 {
+		return .Invalid_Second
+	}
+	if time.nano < 0 || time.nano > 1e9 {
+		return .Invalid_Nano
+	}
+	return .None
+}
+
+validate_datetime :: proc(using datetime: DateTime) -> (err: Error) {
+	validate(date) or_return
+	validate(time) or_return
+	return .None
+}
+
+validate :: proc{
+	validate_date,
+	validate_year_month_day,
+	validate_ordinal,
+	validate_time,
+	validate_datetime,
 }

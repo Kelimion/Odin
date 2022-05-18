@@ -38,15 +38,34 @@ day_of_week :: proc(ordinal: Ordinal) -> (day: Weekday) {
 	return Weekday((ordinal - EPOCH) %% 7)
 }
 
-
-diff_dates :: proc(a, b: Date) -> (delta: Delta, err: Error) {
+subtract_dates :: proc(a, b: Date) -> (delta: Delta, err: Error) {
 	ord_a := date_to_ordinal(a) or_return
 	ord_b := date_to_ordinal(b) or_return
 
 	delta  = Delta{days=ord_b - ord_a}
 	return
 }
-diff :: proc{diff_dates}
+
+subtract_datetimes :: proc(a, b: DateTime) -> (delta: Delta, err: Error) {
+	ord_a := date_to_ordinal(a) or_return
+	ord_b := date_to_ordinal(b) or_return
+
+	validate(a.time) or_return
+	validate(b.time) or_return
+
+	seconds_a := a.hour * 3600 + a.minute * 60 + a.second
+	seconds_b := b.hour * 3600 + b.minute * 60 + b.second
+
+	delta = Delta{ord_b - ord_a, seconds_b - seconds_a, b.nano - a.nano}
+	return
+}
+
+subtract_deltas :: proc(a, b: Delta) -> (delta: Delta, err: Error) {
+	delta = Delta{a.days - b.days, a.seconds - b.seconds, a.nanos - b.nanos}
+	delta = normalize_delta(delta) or_return
+	return
+}
+sub :: proc{subtract_datetimes, subtract_dates, subtract_deltas}
 
 add_days_to_date :: proc(a: Date, days: int) -> (date: Date, err: Error) {
 	ord := date_to_ordinal(a) or_return
@@ -56,11 +75,58 @@ add_days_to_date :: proc(a: Date, days: int) -> (date: Date, err: Error) {
 
 add_delta_to_date :: proc(a: Date, delta: Delta) -> (date: Date, err: Error) {
 	ord := date_to_ordinal(a) or_return
+	// Because the input is a Date, we add only the days from the Delta.
 	ord += delta.days
 	return ordinal_to_date(ord)
 }
-add :: proc{add_days_to_date, add_delta_to_date}
 
+add_delta_to_datetime :: proc(a: DateTime, delta: Delta) -> (datetime: DateTime, err: Error) {
+	days   := date_to_ordinal(a)     or_return
+
+	a_seconds := a.hour * 3600 + a.minute * 60 + a.second
+	a_delta   := Delta{days=days, seconds=a_seconds, nanos=a.nano}
+
+	sum_delta := Delta{days=a_delta.days + delta.days, seconds=a_delta.seconds + delta.seconds, nanos=a_delta.nanos + delta.nanos}
+	sum_delta  = normalize_delta(sum_delta) or_return
+
+	datetime.date = ordinal_to_date(sum_delta.days) or_return
+
+	r: int
+	datetime.hour, r                 = divmod(sum_delta.seconds, 3600)
+	datetime.minute, datetime.second = divmod(r, 60)
+	datetime.nano = sum_delta.nanos
+
+	return
+}
+add :: proc{add_days_to_date, add_delta_to_date, add_delta_to_datetime}
+
+day_number :: proc(date: Date) -> (day_number: int, err: Error) {
+	validate(date) or_return
+
+	ord := unsafe_date_to_ordinal(date)
+	_, day_number = unsafe_ordinal_to_year(ord)
+	return
+}
+
+days_remaining :: proc(date: Date) -> (days_remaining: int, err: Error) {
+	// Alternative formulation `day_number` subtracted from 365 or 366 depending on leap year
+	validate(date) or_return
+	delta := sub(date, Date{date.year, 12, 31}) or_return
+	return delta.days, .None
+}
+
+last_day_of_month :: proc(year, month: int) -> (day: int, err: Error) {
+	// Not using formula 2.27 from the book. This is far simpler and gives the same answer.
+
+	validate(Date{year, month, 1}) or_return
+	month_days := MONTH_DAYS
+
+	day = month_days[month]
+	if month == 2 && is_leap_year(year) {
+		day += 1
+	}
+	return
+}
 
 new_year :: proc(year: int) -> (new_year: Date, err: Error) {
 	new_year = {year, 1, 1}
@@ -95,10 +161,28 @@ year_range :: proc(year: int, allocator := context.allocator) -> (range: []Date)
 	return
 }
 
+normalize_delta :: proc(delta: Delta) -> (normalized: Delta, err: Error) {
+	// Distribute nanos into seconds and remainder
+	seconds, nanos := divmod(delta.nanos, 1e9)
+
+	// Add original seconds to rolled over seconds.
+	seconds += delta.seconds
+	days: int
+
+	// Distribute seconds into number of days and remaining seconds.
+	days, seconds = divmod(seconds, 24 * 3600)
+
+	// Add original days
+	days += delta.days
+
+	if days <= MIN_ORD || days >= MAX_ORD {
+		return {}, .Invalid_Delta
+	}
+	return Delta{days, seconds, nanos}, .None
+}
 
 // The following procedures don't check whether their inputs are in a valid range.
 // They're still exported for those who know their inputs have been validated.
-
 
 unsafe_date_to_ordinal :: proc(date: Date) -> (ordinal: Ordinal) {
 	year_minus_one := date.year - 1
