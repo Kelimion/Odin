@@ -42,7 +42,7 @@ subtract_dates :: proc(a, b: Date) -> (delta: Delta, err: Error) {
 	ord_a := date_to_ordinal(a) or_return
 	ord_b := date_to_ordinal(b) or_return
 
-	delta  = Delta{days=ord_b - ord_a}
+	delta  = Delta{days=ord_a - ord_b}
 	return
 }
 
@@ -56,7 +56,7 @@ subtract_datetimes :: proc(a, b: DateTime) -> (delta: Delta, err: Error) {
 	seconds_a := a.hour * 3600 + a.minute * 60 + a.second
 	seconds_b := b.hour * 3600 + b.minute * 60 + b.second
 
-	delta = Delta{ord_b - ord_a, seconds_b - seconds_a, b.nano - a.nano}
+	delta = Delta{ord_a - ord_b, seconds_a - seconds_b, a.nano - b.nano}
 	return
 }
 
