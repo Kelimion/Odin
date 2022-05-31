@@ -684,3 +684,55 @@ get_rune_kern_advance :: proc(font: ^Font_Info, ch1, ch2: rune) -> (kern: int, e
 get_rune_box :: proc(font: ^Font_Info, codepoint: rune) -> (x0, y0, x1, y1: i32, err: Error) {
 	return
 }
+
+// Length is zero if no kerning table was found
+get_kerning_table_length :: proc(font: ^Font_Info) -> (kerning_table_length: int) {
+	if font != nil && "kern" in font.tables {
+		kern := font.tables["kern"]
+		if kern.length < 12 {
+			return 0
+		}
+		if get16(font.data, i32(kern.offset) + 2) < 1 {
+			return 0 // Number of tables, need at least 1
+		}
+		if get16(font.data, i32(kern.offset) + 8) != 1 {
+			return 0 // Horizontal flag must be set in format
+		}
+		return int(get16(font.data, i32(kern.offset) + 10))
+	}
+	return 0
+}
+
+get_kerning_table :: proc(font: ^Font_Info, table_length: int) -> (kerning_table: []Kerning_Entry, err: Error) {
+	if font != nil && "kern" in font.tables {
+		kern := font.tables["kern"]
+		if kern.length < 12 {
+			return {}, .Table_Corrupt
+		}
+		if get16(font.data, i32(kern.offset) + 2) < 1 {
+			return // Number of tables, need at least 1
+		}
+		if get16(font.data, i32(kern.offset) + 8) != 1 {
+			return // Horizontal flag must be set in format
+		}
+
+		_length := get_type(font.data[kern.offset + 10:], u16be) or_return
+		length  := int(_length)
+
+		if table_length < length {
+			length = table_length
+		}
+
+		if length * size_of(Kerning_Entry) + 18 > int(kern.length) {
+			return {}, .Table_Corrupt
+		}
+
+		raw_kerning_data := mem.slice_data_cast([]Kerning_Entry_Raw, font.data[int(kern.offset + 18):][:length * size_of(Kerning_Entry_Raw)])
+		kerning_table     = make([]Kerning_Entry, length)
+
+		for r, i in raw_kerning_data {
+			kerning_table[i] = {int(r.glyph1), int(r.glyph2), int(r.advance)}
+		}
+	}
+	return
+}

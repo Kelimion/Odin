@@ -1,7 +1,7 @@
 /*
 OTF/TTF font rasterizer.
 
-An idiotmatic source port of stb_truetype.h v1.26
+An idiomatic source port of stb_truetype.h v1.26
 Released under Odin's 3-BSD license.
 
 With thanks to Sean Barrett, et al for the original code.

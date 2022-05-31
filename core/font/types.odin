@@ -317,3 +317,17 @@ Digital_Signature_Header :: struct {
 	flags:          Digital_Signature_Header_Flags,
 }
 #assert(size_of(Digital_Signature_Header) == 8)
+
+Kerning_Entry :: struct #packed {
+	glyph1:  int,
+	glyph2:  int,
+	advance: int,
+}
+#assert(size_of(Kerning_Entry) == 3 * size_of(int))
+
+Kerning_Entry_Raw :: struct #packed {
+	glyph1:  u16be,
+	glyph2:  u16be,
+	advance: i16be,
+}
+#assert(size_of(Kerning_Entry_Raw) == 6)
