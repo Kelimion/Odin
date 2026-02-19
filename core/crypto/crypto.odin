@@ -8,6 +8,10 @@ import subtle "core:crypto/_subtle"
 // Omit large precomputed tables, trading off performance for size.
 COMPACT_IMPLS: bool : #config(ODIN_CRYPTO_COMPACT, false)
 
+// Force constant-time software multiplication on hardware that
+// does not offer constant-time c = a * b instructions.
+CT_SW_MUL: bool : #config(ODIN_CRYPTO_CT_SW_MUL, false)
+
 // HAS_RAND_BYTES is true iff the runtime provides a cryptographic
 // entropy source.
 HAS_RAND_BYTES :: runtime.HAS_RAND_BYTES
