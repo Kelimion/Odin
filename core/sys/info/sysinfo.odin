@@ -48,9 +48,24 @@ cpu_name :: proc(allocator: runtime.Allocator) -> (name: string, err: runtime.Al
 	return _cpu_name(allocator)
 }
 
+/*
+Retrieves RAM statistics.
+
+Unavailable stats will be returned as `0` bytes.
+
+Returns:
+- total_ram:  Total RAM reported by the operating system, in bytes
+- free_ram:   Free RAM reported by the operating system, in bytes
+- total_swap: Total SWAP reported by the operating system, in bytes
+- free_swap:  Free SWAP reported by the operating system, in bytes
+- ok:         `true` when we could RAM statistics, `false` otherwise
+*/
+ram_stats :: proc "contextless" () -> (total_ram, free_ram, total_swap, free_swap: i64, ok: bool) {
+	return _ram_stats()
+}
 
 os_version: OS_Version
-ram:        RAM
+
 gpus:       []GPU
 
 // Only on MacOS, contains the actual MacOS version, while the `os_version` contains the kernel version.
@@ -81,17 +96,10 @@ OS_Version :: struct {
 	as_string: string,
 }
 
-RAM :: struct {
-	total_ram:  int,
-	free_ram:   int,
-	total_swap: int,
-	free_swap:  int,
-}
-
 GPU :: struct {
 	vendor_name: string,
 	model_name:  string,
-	total_ram:   int,
+	total_ram:   int, // i64,
 }
 
 @(private)

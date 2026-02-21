@@ -21,9 +21,6 @@ init_platform :: proc "contextless" () {
 
 		info    := NS.ProcessInfo.processInfo()
 		version  = info->operatingSystemVersion()
-		mem     := info->physicalMemory()
-
-		ram.total_ram = int(mem)
 	}
 
 	macos_version = {int(version.majorVersion), int(version.minorVersion), int(version.patchVersion)}
@@ -99,4 +96,10 @@ init_platform :: proc "contextless" () {
 	}
 
 	os_version.as_string = string(b.buf[:])
+}
+
+@(private)
+_ram_stats :: proc "contextless" () -> (total_ram, free_ram, total_swap, free_swap: i64, ok: bool) {
+	info := NS.ProcessInfo.processInfo()
+	return i64(info->physicalMemory()), 0, 0, 0, true
 }

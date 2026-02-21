@@ -255,21 +255,22 @@ init_os_version :: proc "contextless" () {
 	}
 }
 
-@(init, private)
-init_ram :: proc "contextless" () {
+@(private)
+_ram_stats :: proc "contextless" () -> (total_ram, free_ram, total_swap, free_swap: i64, ok: bool) {
 	state: sys.MEMORYSTATUSEX
 
 	state.dwLength = size_of(state)
-	ok := sys.GlobalMemoryStatusEx(&state)
-	if !ok {
+	if ok := sys.GlobalMemoryStatusEx(&state); !ok {
 		return
 	}
-	ram = RAM{
-		total_ram  = int(state.ullTotalPhys),
-		free_ram   = int(state.ullAvailPhys),
-		total_swap = int(state.ullTotalPageFil),
-		free_swap  = int(state.ullAvailPageFil),
-	}
+
+	total_ram  = i64(state.ullTotalPhys)
+	free_ram   = i64(state.ullAvailPhys)
+	total_swap = i64(state.ullTotalPageFil)
+	free_swap  = i64(state.ullAvailPageFil)
+	ok         = true
+
+	return
 }
 
 @(init, private)

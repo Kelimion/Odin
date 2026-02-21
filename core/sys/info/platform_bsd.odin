@@ -64,12 +64,17 @@ init_os_version :: proc "contextless" () {
 	os_version.as_string = strings.to_string(b)
 }
 
-@(init, private)
-init_ram :: proc "contextless" () {
+@(private)
+_ram_stats :: proc "contextless" () -> (total_ram, free_ram, total_swap, free_swap: i64, ok: bool) {
 	// Retrieve RAM info using `sysctl`
 	mib := []i32{sys.CTL_HW, sys.HW_PHYSMEM64}
-	mem_size: u64
-	if sys.sysctl(mib, &mem_size) {
-		ram.total_ram = int(mem_size)
+	if sys.sysctl(mib, &total_ram) {
+		ok = true
 	}
+
+	mib = []i32{sys.CTL_HW, sys.HW_USERMEM64}
+	if sys.sysctl(mib, &free_ram) {
+		ok = true
+	}
+	return
 }
