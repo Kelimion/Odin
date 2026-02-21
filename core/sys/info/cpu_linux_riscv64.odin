@@ -3,14 +3,13 @@
 package sysinfo
 
 import "base:intrinsics"
-
+import "base:runtime"
 import "core:sys/linux"
+import "core:strconv"
+import "core:strings"
 
-@(init, private)
-init_cpu_features :: proc "contextless" () {
-	_features: CPU_Features
-	defer cpu.features = _features
-
+@(private)
+_cpu_features :: proc "contextless" () -> (features: CPU_Features, ok: bool) {
 	HWCAP_Bits :: enum u64 {
 		I = 'I' - 'A',
 		M = 'M' - 'A',
@@ -48,25 +47,25 @@ init_cpu_features :: proc "contextless" () {
 
 			cap := transmute(HWCAP)(val)
 			if .I in cap {
-				_features += { .I }
+				features += { .I }
 			}
 			if .M in cap {
-				_features += { .M }
+				features += { .M }
 			}
 			if .A in cap {
-				_features += { .A }
+				features += { .A }
 			}
 			if .F in cap {
-				_features += { .F }
+				features += { .F }
 			}
 			if .D in cap {
-				_features += { .D }
+				features += { .D }
 			}
 			if .C in cap {
-				_features += { .C }
+				features += { .C }
 			}
 			if .V in cap {
-				_features += { .V }
+				features += { .V }
 			}
 			break
 		}
@@ -88,26 +87,62 @@ init_cpu_features :: proc "contextless" () {
 		assert_contextless(pairs[0].key == .IMA_EXT_0)
 		exts := pairs[0].value.ima_ext_0
 		exts -= { .FD, .C, .V }
-		_features += transmute(CPU_Features)exts
+		features += transmute(CPU_Features)exts
 
 		if pairs[2].key == .MISALIGNED_SCALAR_PERF {
 			if pairs[2].value.misaligned_scalar_perf == .FAST {
-				_features += { .Misaligned_Supported, .Misaligned_Fast }
+				features += { .Misaligned_Supported, .Misaligned_Fast }
 			} else if pairs[2].value.misaligned_scalar_perf != .UNSUPPORTED {
-				_features += { .Misaligned_Supported }
+				features += { .Misaligned_Supported }
 			}
 		} else {
 			assert_contextless(pairs[1].key == .CPUPERF_0)
 			if .FAST in pairs[1].value.cpu_perf_0 {
-				_features += { .Misaligned_Supported, .Misaligned_Fast }
+				features += { .Misaligned_Supported, .Misaligned_Fast }
 			} else if .UNSUPPORTED not_in pairs[1].value.cpu_perf_0 {
-				_features += { .Misaligned_Supported }
+				features += { .Misaligned_Supported }
 			}
 		}
 	}
+
+	return features, true
 }
 
-@(init, private)
-init_cpu_name :: proc "contextless" () {
-	cpu.name = "RISCV64"
+@(private)
+_cpu_name :: proc(allocator: runtime.Allocator, loc := #caller_location) -> (name: string, err: runtime.Allocator_Error) #optional_allocator_error {
+	name = "RISCV64"
+	data := allocator.procedure(allocator.data, .Alloc, len(name), 1, nil, 0, loc) or_return
+	copy(data, name)
+	return string(data), nil
+}
+
+@(private)
+_cpu_core_count :: proc "contextless" () -> (physical: int, logical: int, ok: bool) {
+	context = runtime.default_context() // No allocations, only needed because `core:strings` wants it.
+	fd, err := linux.open("/proc/cpuinfo", {})
+	if err != .NONE { return }
+	defer linux.close(fd)
+
+	// This is probably enough right?
+	buf: [4096]byte
+	n, rerr := linux.read(fd, buf[:])
+	if rerr != .NONE || n == 0 { return }
+
+	physical_ok, logical_ok: bool
+
+	str := string(buf[:n])
+	for line in strings.split_lines_iterator(&str) {
+		key, _, value := strings.partition(line, ":")
+		key   = strings.trim_space(key)
+		value = strings.trim_space(value)
+
+		if key == "cpu cores" && !physical_ok{
+			physical, physical_ok = strconv.parse_int(value)
+		}
+
+		if key == "siblings" && !logical_ok{
+			logical, logical_ok = strconv.parse_int(value)
+		}
+	}
+	return physical, logical, physical_ok || logical_ok
 }

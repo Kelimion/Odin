@@ -20,7 +20,10 @@ Example:
 		fmt.printfln("OS:        %v",      si.os_version.as_string)
 		fmt.printfln("OS:        %#v",     si.os_version)
 		fmt.printfln("CPU:       %v",      si.cpu.name)
-		fmt.printfln("CPU cores: %vc/%vt", si.cpu.physical_cores, si.cpu.logical_cores)
+		physical, logical, ok := cpu_core_count()
+		if cpu_core_ok {
+			fmt.printfln("CPU cores: %vc/%vt", si.cpu.physical_cores, si.cpu.logical_cores)
+		}
 		fmt.printfln("RAM:       %#.1M",   si.ram.total_ram)
 
 		fmt.println()

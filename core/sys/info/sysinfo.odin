@@ -1,8 +1,53 @@
 package sysinfo
 
-when !(ODIN_ARCH == .amd64 || ODIN_ARCH == .i386 || ODIN_ARCH == .arm32 || ODIN_ARCH == .arm64 || ODIN_ARCH == .riscv64 || ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32) {
-	#assert(false, "This package is unsupported on this architecture.")
+#assert(
+	ODIN_ARCH == .amd64   || ODIN_ARCH == .i386      || \
+	ODIN_ARCH == .arm32   || ODIN_ARCH == .arm64     || \
+	ODIN_ARCH == .wasm32  || ODIN_ARCH == .wasm64p32 || \
+	ODIN_ARCH == .riscv64,
+	"This package is unsupported on this architecture.")
+
+import "base:runtime"
+
+/*
+Retrieves the number of physical and logical CPU cores.
+
+Returns:
+- physical: The number of physical cores
+- logical:  The number of logical cores
+- ok:       `true` when we could retrieve the CPU information, `false` otherwise
+*/
+cpu_core_count :: proc "contextless" () -> (physical: int, logical: int, ok: bool) {
+	return _cpu_core_count()
 }
+
+/*
+Retrieves CPU features where available.
+
+Returns:
+- features: An architecture-specific `bit_set`
+- ok:       `true` if we could retrieve the CPU features, `false` otherwise
+*/
+cpu_features :: proc "contextless" () -> (features: CPU_Features, ok: bool) {
+	return _cpu_features()
+}
+
+/*
+Retrieves the CPU's name.
+
+*Allocates Using Provided Allocator*
+
+Input:
+- allocator: a `runtime.Allocator`
+
+Returns:
+- name: A cloned `string` containing the CPU model name. "" if failed
+- err:  An optional `runtime.Allocator_Error`
+*/
+cpu_name :: proc(allocator: runtime.Allocator) -> (name: string, err: runtime.Allocator_Error) #optional_allocator_error {
+	return _cpu_name(allocator)
+}
+
 
 os_version: OS_Version
 ram:        RAM

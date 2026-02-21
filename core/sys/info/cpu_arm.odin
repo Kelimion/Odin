@@ -1,6 +1,7 @@
 #+build arm32, arm64
 package sysinfo
 
+import "base:runtime"
 import "core:sys/unix"
 
 _ :: unix
@@ -40,35 +41,31 @@ CPU_Feature :: enum u64 {
 }
 
 CPU_Features :: distinct bit_set[CPU_Feature; u64]
-CPU :: struct {
-	name:           Maybe(string),
-	features:       Maybe(CPU_Features),
-	physical_cores: int,
-	logical_cores:  int,
-}
-cpu: CPU
 
 @(private)
-cpu_name_buf: [128]byte
-
-@(init, private)
-init_cpu_name :: proc "contextless" () {
+_cpu_name :: proc(allocator: runtime.Allocator, loc := #caller_location) -> (name: string, err: runtime.Allocator_Error) #optional_allocator_error {
 	generic := true
 
+	buf: [256]u8
+
 	when ODIN_OS == .Darwin {
-		if unix.sysctlbyname("machdep.cpu.brand_string", &cpu_name_buf) {
-			cpu.name = string(cstring(rawptr(&cpu_name_buf)))
+		if unix.sysctlbyname("machdep.cpu.brand_string", &buf) {
+			name = string(cstring(rawptr(&buf)))
 			generic = false
 		}
 	}
 
 	if generic {
 		when ODIN_ARCH == .arm64 {
-			copy(cpu_name_buf[:], "ARM64")
-			cpu.name = string(cpu_name_buf[:len("ARM64")])
+			copy(buf[:], "ARM64")
+			name = string(buf[:len("ARM64")])
 		} else {
-			copy(cpu_name_buf[:], "ARM")
-			cpu.name = string(cpu_name_buf[:len("ARM")])
+			copy(buf[:], "ARM")
+			name = string(buf[:len("ARM")])
 		}
 	}
+
+	data := allocator.procedure(allocator.data, .Alloc, len(name), 1, nil, 0, loc) or_return
+	copy(data, name)
+	return string(data), nil
 }

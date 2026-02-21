@@ -4,10 +4,11 @@ package sysinfo
 
 import "base:runtime"
 import "core:sys/linux"
+import "core:strconv"
 import "core:strings"
 
-@(init, private)
-init_cpu_features :: proc "contextless" () {
+@(private)
+_cpu_features :: proc "contextless" () -> (features: CPU_Features, ok: bool) {
 	context = runtime.default_context()
 	fd, err := linux.open("/proc/cpuinfo", {})
 	if err != .NONE { return }
@@ -18,9 +19,6 @@ init_cpu_features :: proc "contextless" () {
 	n, rerr := linux.read(fd, buf[:])
 	if rerr != .NONE || n == 0 { return }
 
-	features: CPU_Features
-	defer cpu.features = features
-
 	str := string(buf[:n])
 	for line in strings.split_lines_iterator(&str) {
 		key, _, value := strings.partition(line, ":")
@@ -28,6 +26,8 @@ init_cpu_features :: proc "contextless" () {
 		value = strings.trim_space(value)
 
 		if key != "Features" { continue }
+
+		ok = true
 
 		for feature in strings.split_by_byte_iterator(&value, ' ') {
 			switch feature {
@@ -43,25 +43,58 @@ init_cpu_features :: proc "contextless" () {
 			case "jscvt":         features += { .jscvt }
 			case "asimdrdm":      features += { .rdm }
 
-			case "flagm":  features += { .flagm }
-			case "flagm2": features += { .flagm2 }
-			case "crc32":  features += { .crc32 }
+			case "flagm":         features += { .flagm }
+			case "flagm2":        features += { .flagm2 }
+			case "crc32":         features += { .crc32 }
 
-			case "atomics": features += { .lse }
-			case "lrcpc":   features += { .lrcpc }
-			case "ilrcpc":  features += { .lrcpc2 }
+			case "atomics":       features += { .lse }
+			case "lrcpc":         features += { .lrcpc }
+			case "ilrcpc":        features += { .lrcpc2 }
 
-			case "aes":    features += { .aes }
-			case "pmull":  features += { .pmull }
-			case "sha1":   features += { .sha1 }
-			case "sha2":   features += { .sha256 }
-			case "sha3":   features += { .sha3 }
-			case "sha512": features += { .sha512 }
+			case "aes":           features += { .aes }
+			case "pmull":         features += { .pmull }
+			case "sha1":          features += { .sha1 }
+			case "sha2":          features += { .sha256 }
+			case "sha3":          features += { .sha3 }
+			case "sha512":        features += { .sha512 }
 
-			case "sb":   features += { .sb }
-			case "ssbs": features += { .ssbs }
+			case "sb":            features += { .sb }
+			case "ssbs":          features += { .ssbs }
 			}
 		}
 		break
 	}
+
+	return features, ok
+}
+
+@(private)
+_cpu_core_count :: proc "contextless" () -> (physical: int, logical: int, ok: bool) {
+	context = runtime.default_context()
+	fd, err := linux.open("/proc/cpuinfo", {})
+	if err != .NONE { return }
+	defer linux.close(fd)
+
+	// This is probably enough right?
+	buf: [4096]byte
+	n, rerr := linux.read(fd, buf[:])
+	if rerr != .NONE || n == 0 { return }
+
+	physical_ok, logical_ok: bool
+
+	str := string(buf[:n])
+	for line in strings.split_lines_iterator(&str) {
+		key, _, value := strings.partition(line, ":")
+		key   = strings.trim_space(key)
+		value = strings.trim_space(value)
+
+		if key == "cpu cores" && !physical_ok{
+			physical, physical_ok = strconv.parse_int(value)
+		}
+
+		if key == "siblings" && !logical_ok{
+			logical, logical_ok = strconv.parse_int(value)
+		}
+	}
+	return physical, logical, physical_ok || logical_ok
 }
