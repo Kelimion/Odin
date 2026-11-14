@@ -20,6 +20,7 @@ Parser :: struct {
 	parse_integers: bool,
 	depth:          int,
 	union_attempt:  Union_Attempt,
+	flags:          Unmarshal_Flags,
 }
 
 make_parser :: proc{
@@ -224,7 +225,10 @@ parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 
 	case .Integer:
 		advance_token(p)
-		i, _ := parse_integer(token.text)
+		i, ok := parse_integer(token.text)
+		if u, uok := parse_unsigned_integer(token.text); !ok && uok {
+			i = i128(u)
+		}
 		value = Integer(i)
 		return
 	case .Float:

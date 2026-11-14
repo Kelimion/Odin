@@ -624,7 +624,10 @@ review_json5_numbers :: proc(t: ^testing.T) {
 		m: map[i128]int
 		err := json.unmarshal_string(`{"0x7fffffffffffffffffffffffffffffff": 1, "-0x80000000000000000000000000000000": 2, "0X1f": 3}`, &m, spec, context.temp_allocator)
 		testing.expectf(t, err == nil && len(m) == 3 && m[max(i128)] == 1 && m[min(i128)] == 2 && m[31] == 3, "%v: %v, %v", spec, m, err)
-		for src in ([]string{`{"0x80000000000000000000000000000000": 1}`, `{"-0x80000000000000000000000000000001": 1}`, `{"0x100000000000000000000000000000000": 1}`}) {
+		u: map[u128]int
+		err = json.unmarshal_string(`{"0x80000000000000000000000000000000": 1, "0XFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF": 2}`, &u, spec, context.temp_allocator)
+		testing.expectf(t, err == nil && len(u) == 2 && u[1 << 127] == 1 && u[max(u128)] == 2, "%v: %v, %v", spec, u, err)
+		for src in ([]string{`{"-0x80000000000000000000000000000001": 1}`, `{"0x100000000000000000000000000000000": 1}`}) {
 			o: map[i128]int
 			err = json.unmarshal_string(src, &o, spec, context.temp_allocator)
 			testing.expectf(t, err != nil, "%v %q: %v, %v", spec, src, o, err)
@@ -1061,6 +1064,43 @@ review_unmarshal_bit_set_128 :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil && s.flags == {0, 2} && s.flags_be == {0, 2} && s.flags_le == {0, 2}, "%v %v", s, err)
 	err = json.unmarshal_string(`{"flags": -170141183460469231731687303715884105728}`, &s)
 	testing.expectf(t, err == nil && s.flags == {127}, "%v %v", s, err)
+}
+
+@(test)
+review_unmarshal_beyond_i128 :: proc(t: ^testing.T) {
+	S :: struct {
+		flags: bit_set[0..<128],
+		u:     u128,
+		w:     u64,
+	}
+	s: S
+	err := json.unmarshal_string(`{"flags": 170141183460469231731687303715884105728, "u": 340282366920938463463374607431768211455, "w": 170141183460469231731687303715884105729}`, &s)
+	testing.expectf(t, err == nil && s.flags == {127} && s.u == max(u128) && s.w == 1, "%v %v", s, err)
+
+	s = {}
+	err = json.unmarshal_string(`{"u": 170141183460469231731687303715884105728}`, &s, flags = {.Disallow_Integer_Wrap})
+	testing.expectf(t, err == nil && s.u == 1 << 127, "%v %v", s, err)
+	err = json.unmarshal_string(`{"w": 170141183460469231731687303715884105728}`, &s, flags = {.Disallow_Integer_Wrap})
+	e, unsupported := err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && e.field == "w", "%v", err)
+	delete(e.field)
+	err = json.unmarshal_string(`{"u": 340282366920938463463374607431768211456}`, &s, flags = {.Disallow_Integer_Wrap})
+	e, unsupported = err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && e.field == "u", "%v", err)
+	delete(e.field)
+
+	s = {}
+	err = json.unmarshal_string(`{"u": 0X80000000000000000000000000000000}`, &s, .JSON5)
+	testing.expectf(t, err == nil && s.u == 1 << 127, "%v %v", s, err)
+
+	q: u128
+	err = json.unmarshal_string(`"170141183460469231731687303715884105728"`, &q)
+	testing.expectf(t, err == nil && q == 1 << 127, "%v %v", q, err)
+
+	m: map[u128]int
+	defer delete(m)
+	err = json.unmarshal_string(`{"170141183460469231731687303715884105728": 1}`, &m)
+	testing.expectf(t, err == nil && len(m) == 1 && m[1 << 127] == 1, "%v %v", m, err)
 }
 
 @(test)
@@ -1677,4 +1717,160 @@ review_unmarshal_duplicate_keys :: proc(t: ^testing.T) {
 	err := json.unmarshal_string(`{"0x10": 1, "16": 2}`, &im, .JSON, context.temp_allocator, ALLOW)
 	_, is_type := err.(json.Unsupported_Type_Error)
 	testing.expectf(t, is_type, "%v %v", im, err)
+}
+
+@(test)
+review_unmarshal_f32_rounding_and_negative_zero :: proc(t: ^testing.T) {
+	F32_Case :: struct {
+		src:  string,
+		spec: json.Specification,
+		bits: u32,
+	}
+	F32_CASES :: []F32_Case{
+		{`[1.0000000596046447753906250000001]`,   .JSON,  0x3f800001},
+		{`["1.0000000596046447753906250000001"]`, .JSON,  0x3f800001},
+		{`[1152921573326323713]`,                 .JSON,  0x5d800001},
+		{`["1152921573326323713"]`,               .JSON,  0x5d800001},
+		{`[0x10000010000000001]`,                 .JSON5, 0x5f800001},
+		{`[-0x10000010000000001]`,                .JSON5, 0xdf800001},
+		{`[-0]`,                                  .JSON,  0x80000000},
+		{`[-0x0]`,                                .JSON5, 0x80000000},
+		{`[-0.0]`,                                .JSON,  0x80000000},
+	}
+	for c in F32_CASES {
+		v: [1]f32
+		err := json.unmarshal_string(c.src, &v, c.spec, context.temp_allocator)
+		testing.expectf(t, err == nil && transmute(u32)v[0] == c.bits, "%s: %8x %v", c.src, transmute(u32)v[0], err)
+	}
+
+	c: complex64
+	err := json.unmarshal_string(`[1.0000000596046447753906250000001, 1152921573326323713]`, &c, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && transmute(u32)real(c) == 0x3f800001 && transmute(u32)imag(c) == 0x5d800001, "%v %v", c, err)
+
+	for src in ([]string{`[-0]`, `["-0"]`}) {
+		d: [1]f64
+		err = json.unmarshal_string(src, &d, .JSON, context.temp_allocator)
+		testing.expectf(t, err == nil && transmute(u64)d[0] == 0x8000000000000000, "%s: %v %v", src, d[0], err)
+	}
+}
+
+@(test)
+review_unmarshal_bit_set_range_and_using_key :: proc(t: ^testing.T) {
+	E :: enum {
+		A,
+		B,
+		C,
+	}
+	sets: [1]bit_set[E]
+	err := json.unmarshal_string(`[7]`, &sets, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && sets[0] == {.A, .B, .C}, "%v %v", sets, err)
+	wide: [1]bit_set[E; u32]
+	letters: [1]bit_set['a'..='c']
+	for src in ([]string{`[8]`, `[255]`}) {
+		sets = {}
+		err = json.unmarshal_string(src, &sets, .JSON, context.temp_allocator)
+		_, is_type := err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && sets[0] == {}, "%s: %v %v", src, sets, err)
+		err = json.unmarshal_string(src, &wide, .JSON, context.temp_allocator)
+		_, is_type = err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && wide[0] == {}, "%s: %v %v", src, wide, err)
+		err = json.unmarshal_string(src, &letters, .JSON, context.temp_allocator)
+		_, is_type = err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && letters[0] == {}, "%s: %v %v", src, letters, err)
+	}
+	err = json.unmarshal_string(`[5]`, &letters, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && letters[0] == {'a', 'c'}, "%v %v", letters, err)
+
+	BF :: bit_field u8 {
+		a: u8 | 4,
+		b: u8 | 4,
+	}
+	bf: [1]BF
+	for src in ([]string{`[0]`, `[255]`, `[256]`, `["1"]`}) {
+		err = json.unmarshal_string(src, &bf, .JSON, context.temp_allocator)
+		_, is_type := err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && bf[0].a == 0 && bf[0].b == 0, "%s: %v %v", src, bf, err)
+	}
+
+	Inner :: struct {
+		x, y: int,
+	}
+	Outer :: struct {
+		using _: Inner,
+		z: int,
+	}
+	o: Outer
+	err = json.unmarshal_string(`{"_": {"x": 1, "y": 2}, "z": 3}`, &o, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && o.x == 0 && o.y == 0 && o.z == 3, "%v %v", o, err)
+	o = {}
+	err = json.unmarshal_string(`{"x": 1, "_": {"x": 5}}`, &o, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && o.x == 1, "%v %v", o, err)
+
+	Mid :: struct {
+		using _: Inner,
+		m: int,
+	}
+	Top :: struct {
+		using _: Mid,
+		w: int,
+	}
+	top: Top
+	err = json.unmarshal_string(`{"_": {"m": 4}, "x": 1, "m": 2, "w": 3}`, &top, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && top.x == 1 && top.m == 2 && top.w == 3, "%v %v", top, err)
+
+	Tagged :: struct {
+		using _: Inner `json:"in"`,
+	}
+	tagged: Tagged
+	err = json.unmarshal_string(`{"in": {"x": 6}}`, &tagged, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && tagged.x == 6, "%v %v", tagged, err)
+}
+
+@(test)
+review_unmarshal_short_arrays_zero_tail :: proc(t: ^testing.T) {
+	a := [3]int{7, 8, 9}
+	err := json.unmarshal_string(`[1]`, &a, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && a == {1, 0, 0}, "%v %v", a, err)
+
+	E :: enum {
+		A,
+		B,
+		C,
+	}
+	ea := [E]int{.A = 7, .B = 8, .C = 9}
+	err = json.unmarshal_string(`[1]`, &ea, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && ea[.A] == 1 && ea[.B] == 0 && ea[.C] == 0, "%v %v", ea, err)
+
+	c := complex64(5 + 6i)
+	err = json.unmarshal_string(`[1]`, &c, .JSON, context.temp_allocator)
+	testing.expectf(t, err == nil && c == 1, "%v %v", c, err)
+}
+
+@(test)
+review_unmarshal_sjson_root_into_value :: proc(t: ^testing.T) {
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		v: json.Value
+		err := json.unmarshal_string("a = 1\nb = \"x\"\n", &v, .SJSON, flags = flags)
+		obj, is_obj := v.(json.Object)
+		a, a_ok := obj["a"].(json.Integer)
+		b, b_ok := obj["b"].(json.String)
+		testing.expectf(t, err == nil && is_obj && len(obj) == 2 && a_ok && a == 1 && b_ok && b == "x", "%v: %v %v", flags, v, err)
+		json.destroy_value(v)
+
+		v = nil
+		err = json.unmarshal_string("a = 1 b", &v, .SJSON, flags = flags)
+		testing.expectf(t, err != nil, "%v: %v %v", flags, v, err)
+		json.destroy_value(v)
+
+		for src in ([]string{`a = "\1"`, `{a = "\1"}`, "a = \"a\xffb\"", "{a = \"a\xffb\"}", "\"\xff\" = 1"}) {
+			v = nil
+			err = json.unmarshal_string(src, &v, .SJSON, flags = flags)
+			if .Skip_Validation in flags {
+				testing.expectf(t, err == json.Error.Invalid_String, "%v %s: %v %v", flags, src, v, err)
+			} else {
+				testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Data, "%v %s: %v %v", flags, src, v, err)
+			}
+			json.destroy_value(v)
+		}
+	}
 }

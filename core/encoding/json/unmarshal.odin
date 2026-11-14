@@ -94,6 +94,8 @@ Registers a user-defined unmarshaler for a specific `typeid`.
 
 WARNING: set_user_unmarshalers must be called before using this procedure.
 
+// TODO-UPDATE-COMMENT: new: braceless SJSON roots bypass the root type's unmarshaler. Proposed: "NOTE: With SJSON, a document whose root object has no braces (`a = 1`) is unmarshalled key by key, so an unmarshaler registered for the root type is not called for it."
+
 Inputs:
 - id: The `typeid` of the custom type.
 - unmarshaler: The `User_Unmarshaler` function for the custom type.
@@ -181,6 +183,7 @@ unmarshal_any :: proc(data: []byte, v: any, spec := DEFAULT_SPECIFICATION, alloc
 	}
 	p := make_parser(data, spec, PARSE_INTEGERS, allocator)
 	p.tok.validated = .Skip_Validation not_in flags
+	p.flags = flags
 
 	data := any{(^rawptr)(v.data)^, ti.variant.(^reflect.Type_Info_Pointer).elem.id}
 
@@ -188,9 +191,9 @@ unmarshal_any :: proc(data: []byte, v: any, spec := DEFAULT_SPECIFICATION, alloc
 
 	err: Unmarshal_Error
 	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
-		err = unmarshal_object(&p, data, .EOF, flags)
+		err = unmarshal_implicit_root(&p, data)
 	} else {
-		err = unmarshal_value(&p, data, flags)
+		err = unmarshal_value(&p, data)
 	}
 	if err != nil {
 		return err
@@ -201,6 +204,23 @@ unmarshal_any :: proc(data: []byte, v: any, spec := DEFAULT_SPECIFICATION, alloc
 	return nil
 }
 
+
+@(private)
+unmarshal_implicit_root :: proc(p: ^Parser, v: any) -> Unmarshal_Error {
+	if v.id != Value {
+		return unmarshal_object(p, v, .EOF)
+	}
+	before := p^
+	obj, err := parse_object_body(p, .EOF)
+	if err != nil {
+		return syntax_error(p, err)
+	}
+	(^Value)(v.data)^ = obj
+	if !p.tok.validated && !validate_document(&before) {
+		return .Invalid_String
+	}
+	return nil
+}
 
 unmarshal :: proc(data: []byte, ptr: ^$T, spec := DEFAULT_SPECIFICATION, allocator := context.allocator, flags := Unmarshal_Flags{}) -> Unmarshal_Error {
 	return unmarshal_any(data, ptr, spec, allocator, flags)
@@ -254,6 +274,10 @@ assign_int :: proc(val: any, i: $T, fits_only := false) -> bool {
 		return true
 	}
 
+	// TODO-UPDATE-COMMENT: new: why `bit_field` is rejected. Proposed: "`bit_field` is rejected to match marshal (a4b8c1ea1, 2024-02); integers only reached its backing after `type_info_core` began unwrapping `bit_field` (af6d2480f, 2024-04)."
+	if _, is_bit_field := reflect.type_info_base(type_info_of(val.id)).variant.(^runtime.Type_Info_Bit_Field); is_bit_field {
+		return false
+	}
 	v := reflect.any_core(val)
 	switch &dst in v {
 	case i8:      return set(&dst, i, fits_only)
@@ -304,6 +328,10 @@ assign_int :: proc(val: any, i: $T, fits_only := false) -> bool {
 
 		ti := type_info_of(v.id)
 		if info, ok := ti.variant.(^runtime.Type_Info_Bit_Set); ok {
+			width := uint(info.upper - info.lower + 1)
+			if width < 128 && u128(i) >> width != 0 {
+				return false
+			}
 			do_byte_swap := is_bit_set_different_endian_to_platform(info.underlying)
 			switch ti.size * 8 {
 			case 0: // no-op.
@@ -399,13 +427,7 @@ parse_hex_integer :: proc "contextless" (digits: string, neg: bool) -> (value: i
 }
 
 @(private, require_results)
-parse_float :: proc(s: string) -> (value: f64, ok: bool) {
-	digits, neg := hex_number_digits(s)
-	if digits == "" {
-		return strconv.parse_f64(s)
-	}
-	acc: u128
-	shift := 0
+parse_hex_mantissa :: proc(digits: string) -> (acc: u128, shift: int, ok: bool) {
 	for c in transmute([]byte)digits {
 		d := hex_digit_value(c) or_return
 		if acc <= max(u128) >> 4 {
@@ -415,8 +437,46 @@ parse_float :: proc(s: string) -> (value: f64, ok: bool) {
 			acc |= u128(d != 0)
 		}
 	}
+	return acc, shift, true
+}
+
+@(private, require_results)
+parse_float :: proc(s: string) -> (value: f64, ok: bool) {
+	digits, neg := hex_number_digits(s)
+	if digits == "" {
+		return strconv.parse_f64(s)
+	}
+	acc, shift := parse_hex_mantissa(digits) or_return
 	value = math.ldexp(f64(acc), shift)
 	return -value if neg else value, true
+}
+
+@(private, require_results)
+parse_float_f32 :: proc(s: string) -> (value: f32, ok: bool) {
+	digits, neg := hex_number_digits(s)
+	if digits == "" {
+		return strconv.parse_f32(s)
+	}
+	acc, shift := parse_hex_mantissa(digits) or_return
+	for acc >> 64 != 0 {
+		acc = (acc >> 1) | (acc & 1)
+		shift += 1
+	}
+	value = math.ldexp(f32(u64(acc)), shift)
+	return -value if neg else value, true
+}
+
+@(private)
+assign_float_text :: proc(val: any, text: string) -> bool {
+	switch _ in reflect.any_core(val) {
+	case f32, f32le, f32be, complex64, quaternion128:
+		f, ok := parse_float_f32(text)
+		return ok && assign_float(val, f)
+	case f16, f16le, f16be, f64, f64le, f64be, complex32, complex128, quaternion64, quaternion256:
+		f, ok := parse_float(text)
+		return ok && assign_float(val, f)
+	}
+	return false
 }
 
 @(private)
@@ -443,6 +503,25 @@ parse_integer :: proc(s: string) -> (value: i128, ok: bool) {
 		acc = acc*10 + u64(c - '0')
 	}
 	return -i128(acc) if neg else i128(acc), true
+}
+
+@(private, require_results)
+parse_unsigned_integer :: proc(s: string) -> (value: u128, ok: bool) {
+	digits, neg := hex_number_digits(s)
+	if digits == "" {
+		return strconv.parse_u128_of_base(s, 10)
+	}
+	if neg {
+		return
+	}
+	for c in transmute([]byte)digits {
+		d := hex_digit_value(c) or_return
+		if value > max(u128) >> 4 {
+			return 0, false
+		}
+		value = value << 4 | d
+	}
+	return value, true
 }
 
 @(private, require_results)
@@ -514,7 +593,7 @@ unmarshal_string_token_alloc :: proc(p: ^Parser, val: any, token: Token) -> (ok:
 }
 
 @(private)
-unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.Type_Info, flags := Unmarshal_Flags{}) -> (ok: bool, err: Error) {
+unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.Type_Info) -> (ok: bool, err: Error) {
 	if val.id == string || val.id == cstring {
 		return unmarshal_string_token_alloc(p, val, token)
 	}
@@ -562,9 +641,10 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 		}
 		i, pok := parse_integer(str)
 		if !pok {
-			return false, nil
+			u, uok := parse_unsigned_integer(str)
+			return uok && assign_int(val, u, .Disallow_Integer_Wrap in p.flags), nil
 		}
-		if assign_int(val, i, .Disallow_Integer_Wrap in flags) {
+		if assign_int(val, i, .Disallow_Integer_Wrap in p.flags) {
 			return true, nil
 		}
 		if assign_float(val, i) {
@@ -574,11 +654,7 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 		f: f64
 		#partial switch number_text_kind(str, p.spec) {
 		case .Integer, .Float:
-			pok: bool
-			f, pok = parse_float(str)
-			if !pok || p.spec == .JSON && !is_finite(f) {
-				return false, nil
-			}
+			return assign_float_text(val, str), nil
 		case .Infinity:
 			f = 0hfff0000000000000 if str[0] == '-' else 0h7ff0000000000000
 		case .NaN:
@@ -598,6 +674,10 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 }
 
 unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err: Unmarshal_Error) {
+	saved_flags := p.flags
+	p.flags += flags
+	defer p.flags = saved_flags
+
 	if _user_unmarshalers != nil {
 		unmarshaler := _user_unmarshalers[v.id]
 		if unmarshaler != nil {
@@ -619,26 +699,26 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 				assign_int(tag, 1)
 			}
 		} else if v.id != Value {
-			return unmarshal_union(p, v, u, flags)
+			return unmarshal_union(p, v, u)
 		}
 	}
 
 	// Handle json.Value as an unknown type
 	if v.id == Value {
-		return unmarshal_json_value(p, v, flags)
+		return unmarshal_json_value(p, v)
 	}
 
 	#partial switch p.curr_token.kind {
 	case .Open_Brace:
-		return unmarshal_object(p, v, .Close_Brace, flags)
+		return unmarshal_object(p, v, .Close_Brace)
 	case .Open_Bracket:
-		return unmarshal_array(p, v, flags)
+		return unmarshal_array(p, v)
 	}
-	return unmarshal_scalar(p, v, id, ti, flags)
+	return unmarshal_scalar(p, v, id, ti)
 }
 
 @(private)
-unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union) -> (err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{id = v.id, token = p.curr_token}
 	size := type_info_of(v.id).size
 
@@ -646,7 +726,7 @@ unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union, flags: 
 		for variant, i in u.variants {
 			mem.zero(v.data, size)
 			variant_p := p^
-			if err = unmarshal_value(&variant_p, any{v.data, variant.id}, flags); err == nil {
+			if err = unmarshal_value(&variant_p, any{v.data, variant.id}); err == nil {
 				p^ = variant_p
 				unmarshal_union_tag(v, u, i)
 				return
@@ -676,7 +756,7 @@ unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union, flags: 
 				if attempt == .Strict {
 					variant_p.union_attempt = .Strict
 				}
-				if err = unmarshal_value(&variant_p, any{v.data, variant.id}, flags); err == nil {
+				if err = unmarshal_value(&variant_p, any{v.data, variant.id}); err == nil {
 					p^ = variant_p
 					p.union_attempt = .None
 					unmarshal_union_tag(v, u, i)
@@ -685,10 +765,10 @@ unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union, flags: 
 			} else {
 				attempt_p := p^
 				attempt_p.union_attempt = attempt
-				if err = unmarshal_union_attempt(&attempt_p, variant, &arena, flags); err == nil {
+				if err = unmarshal_union_attempt(&attempt_p, variant, &arena); err == nil {
 					unmarshal_union_tag(v, u, i)
 					variant_p := p^
-					unmarshal_value(&variant_p, any{v.data, variant.id}, flags) or_return
+					unmarshal_value(&variant_p, any{v.data, variant.id}) or_return
 					p^ = variant_p
 					return
 				}
@@ -717,7 +797,7 @@ unmarshal_union_tag :: proc(v: any, u: ^reflect.Type_Info_Union, index: int) {
 }
 
 @(private)
-unmarshal_union_attempt :: proc(p: ^Parser, variant: ^reflect.Type_Info, arena: ^mem.Dynamic_Arena, flags: Unmarshal_Flags) -> Unmarshal_Error {
+unmarshal_union_attempt :: proc(p: ^Parser, variant: ^reflect.Type_Info, arena: ^mem.Dynamic_Arena) -> Unmarshal_Error {
 	mem.dynamic_arena_reset(arena)
 	allocator := mem.dynamic_arena_allocator(arena)
 	scratch, alloc_err := mem.alloc(max(variant.size, 1), max(variant.align, 1), allocator)
@@ -726,7 +806,7 @@ unmarshal_union_attempt :: proc(p: ^Parser, variant: ^reflect.Type_Info, arena: 
 	}
 	p.allocator = allocator
 	context.allocator = allocator
-	return unmarshal_value(p, any{scratch, variant.id}, flags)
+	return unmarshal_value(p, any{scratch, variant.id})
 }
 
 @(private)
@@ -763,11 +843,11 @@ unmarshal_may_allocate :: proc(id: typeid) -> bool {
 }
 
 @(private)
-unmarshal_json_value :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_json_value :: proc(p: ^Parser, v: any) -> (err: Unmarshal_Error) {
 	before := p^
 	value, value_err := parse_value(p)
 	if value_err != nil {
-		return syntax_error(p, value_err, flags)
+		return syntax_error(p, value_err)
 	}
 	(^Value)(v.data)^ = value
 	if !p.tok.validated && !validate_value(&before) {
@@ -777,7 +857,7 @@ unmarshal_json_value :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err
 }
 
 @(private)
-unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info) -> (err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{id = id, token = p.curr_token}
 	token := p.curr_token
 	if !p.tok.validated {
@@ -800,47 +880,50 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 
 	case .Integer:
 		advance_token(p)
-		fits_only := .Disallow_Integer_Wrap in flags
+		fits_only := .Disallow_Integer_Wrap in p.flags
 		i, iok := parse_integer(token.text)
 		switch {
 		case iok:
 			if assign_int(v, i, fits_only) {
 				return
 			}
-			if assign_float(v, i) {
+			if assign_float_text(v, token.text) {
 				return
 			}
 		case fits_only:
 			// Beyond `i128`, so only a `u128` can hold it
-			if u, uok := strconv.parse_u128(token.text); uok && assign_int(v, u, fits_only) {
+			if u, uok := parse_unsigned_integer(token.text); uok && assign_int(v, u, fits_only) {
 				return
 			}
 		case:
+			if u, uok := parse_unsigned_integer(token.text); uok {
+				i = i128(u)
+			}
 			if assign_int(v, i) {
 				return
 			}
 		}
 		if !iok {
 			// Beyond `i128`, so a float reads the text rather than the wrapped integer
-			if f, fok := parse_float(token.text); fok && (p.spec != .JSON || is_finite(f)) && assign_float(v, f) {
+			if assign_float_text(v, token.text) {
 				return
 			}
 		}
 		return UNSUPPORTED_TYPE
 	case .Float:
 		advance_token(p)
-		f, _ := parse_float(token.text)
-		if p.spec == .JSON && !is_finite(f) {
-			return UNSUPPORTED_TYPE
-		}
-		if assign_float(v, f) {
+		if assign_float_text(v, token.text) {
 			return
 		}
-		if i, fract := math.modf(f); fract == 0 && -(1 << 127) <= i && i < 1 << 127 {
-			if assign_int(v, i128(i), .Disallow_Integer_Wrap in flags) {
+		f, _ := parse_float(token.text)
+		if !is_finite(f) {
+			if p.spec != .JSON && assign_float(v, f) {
 				return
 			}
-			if assign_float(v, i) {
+			return UNSUPPORTED_TYPE
+		}
+		if i, fract := math.modf(f); fract == 0 && -(1 << 127) <= i && i < 1 << 127 {
+			if assign_int(v, i128(i), .Disallow_Integer_Wrap in p.flags) {
 				return
 			}
 		}
@@ -849,7 +932,7 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 	case .Ident:
 		advance_token(p)
 		if p.spec == .MJSON {
-			if unmarshal_string_token(p, any{v.data, ti.id}, token, ti, flags) or_return {
+			if unmarshal_string_token(p, any{v.data, ti.id}, token, ti) or_return {
 				return nil
 			}
 		} else if !p.tok.validated {
@@ -859,7 +942,7 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 
 	case .String:
 		advance_token(p)
-		if unmarshal_string_token(p, any{v.data, ti.id}, token, ti, flags) or_return {
+		if unmarshal_string_token(p, any{v.data, ti.id}, token, ti) or_return {
 			return nil
 		}
 		return UNSUPPORTED_TYPE
@@ -900,15 +983,13 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 
 
 @(private)
-unmarshal_expect_token :: proc(p: ^Parser, kind: Token_Kind, loc := #caller_location) -> Token {
-	prev := p.curr_token
+unmarshal_expect_token :: proc(p: ^Parser, kind: Token_Kind) {
 	err := expect_token(p, kind)
 	assert(err == nil, "unmarshal_expect_token")
-	return prev
 }
 
 @(private)
-syntax_error :: proc(p: ^Parser, err: Error, flags: Unmarshal_Flags) -> Error {
+syntax_error :: proc(p: ^Parser, err: Error) -> Error {
 	if !p.tok.validated && p.prev_token.kind == .EOF {
 		#partial switch err {
 		case .Unexpected_Token, .Expected_String_For_Object_Key, .Expected_Colon_After_Key:
@@ -919,7 +1000,7 @@ syntax_error :: proc(p: ^Parser, err: Error, flags: Unmarshal_Flags) -> Error {
 }
 
 @(private)
-unmarshal_expect :: proc(p: ^Parser, kind: Token_Kind, flags: Unmarshal_Flags, error := Error.Unexpected_Token) -> Error {
+unmarshal_expect :: proc(p: ^Parser, kind: Token_Kind, error := Error.Unexpected_Token) -> Error {
 	if p.tok.validated {
 		unmarshal_expect_token(p, kind)
 		return nil
@@ -949,17 +1030,17 @@ json_name_from_tag_value :: proc(value: string) -> (json_name, extra: string) {
 
 
 @(private)
-unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind, flags: Unmarshal_Flags) -> Unmarshal_Error {
+unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind) -> Unmarshal_Error {
 	ti := reflect.type_info_base(type_info_of(v.id))
 	#partial switch t in ti.variant {
 	case ^reflect.Type_Info_Struct:
 		if .raw_union not_in t.flags {
-			return unmarshal_struct(p, v, ti, end_token, flags)
+			return unmarshal_struct(p, v, ti, end_token)
 		}
 	case ^reflect.Type_Info_Map:
-		return unmarshal_map(p, v, t, end_token, flags)
+		return unmarshal_map(p, v, t, end_token)
 	case ^reflect.Type_Info_Enumerated_Array:
-		return unmarshal_enumerated_array(p, v, t, end_token, flags)
+		return unmarshal_enumerated_array(p, v, t, end_token)
 	}
 	return Unsupported_Type_Error{id = v.id, token = p.curr_token}
 }
@@ -976,24 +1057,24 @@ unmarshal_object_begin :: proc(p: ^Parser, end_token: Token_Kind) -> Error {
 }
 
 @(private)
-unmarshal_close :: proc(p: ^Parser, end_token: Token_Kind, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_close :: proc(p: ^Parser, end_token: Token_Kind) -> (err: Unmarshal_Error) {
 	if end_token != .EOF {
-		unmarshal_expect(p, end_token, flags) or_return
+		unmarshal_expect(p, end_token) or_return
 	}
 	return
 }
 
 @(private)
-unmarshal_object_key :: proc(p: ^Parser, key_buf: []byte, flags: Unmarshal_Flags) -> (key: string, allocated: bool, err: Error) {
+unmarshal_object_key :: proc(p: ^Parser, key_buf: []byte) -> (key: string, allocated: bool, err: Error) {
 	if !p.tok.validated && p.curr_token_err == .Invalid_String {
 		return "", false, .Invalid_String
 	}
 	key_err: Error
 	key, allocated, key_err = parse_object_key_view(p, key_buf)
 	if key_err != nil {
-		return "", false, syntax_error(p, key_err, flags)
+		return "", false, syntax_error(p, key_err)
 	}
-	if err = unmarshal_expect(p, .Colon, flags, .Expected_Colon_After_Key); err != nil {
+	if err = unmarshal_expect(p, .Colon, .Expected_Colon_After_Key); err != nil {
 		if allocated {
 			delete(key, p.allocator)
 		}
@@ -1081,6 +1162,10 @@ scan_duplicate_keys :: proc(p: ^Parser, ti: ^reflect.Type_Info, end_token: Token
 				id = value_ptr^
 			} else if number_text_kind(key, p.spec) == .Integer {
 				key_int, int_ok := parse_integer(key)
+				if !int_ok {
+					key_u, u_ok := parse_unsigned_integer(key)
+					key_int, int_ok = i128(key_u), u_ok
+				}
 				storage: [16]byte
 				if int_ok && assign_int(any{&storage, info.key.id}, key_int) {
 					_, value_ptr, just_inserted, map_err := map_entry(&integer_ids, storage)
@@ -1134,7 +1219,7 @@ scan_duplicate_keys :: proc(p: ^Parser, ti: ^reflect.Type_Info, end_token: Token
 }
 
 @(private)
-unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: Token_Kind, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: Token_Kind) -> (err: Unmarshal_Error) {
 	p.depth += 1
 	defer p.depth -= 1
 	unmarshal_object_begin(p, end_token) or_return
@@ -1145,7 +1230,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 	json_names := ([^]string)(intrinsics.alloca(len(fields)*size_of(string) + 1, align_of(string)))
 
 	field_used: [^]byte
-	if .Allow_Duplicate_Fields not_in flags {
+	if .Allow_Duplicate_Fields not_in p.flags {
 		field_used_bytes := (len(fields)+7)/8
 		field_used = intrinsics.alloca(field_used_bytes + 1, 1)
 		intrinsics.mem_zero(field_used, field_used_bytes)
@@ -1155,7 +1240,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 	using_used:  [^]byte
 
 	dup: []bool
-	if .Allow_Duplicate_Fields in flags {
+	if .Allow_Duplicate_Fields in p.flags {
 		dup = scan_duplicate_keys(p, ti, end_token, true) or_return
 	}
 	defer delete(dup, p.allocator)
@@ -1164,7 +1249,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 	struct_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
 		key_token := p.curr_token
-		key, key_allocated := unmarshal_object_key(p, key_buf[:], flags) or_return
+		key, key_allocated := unmarshal_object_key(p, key_buf[:]) or_return
 		defer if key_allocated {
 			delete(key, p.allocator)
 		}
@@ -1180,7 +1265,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 
 		if skip {
 			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
-				return syntax_error(p, skip_err, flags)
+				return syntax_error(p, skip_err)
 			}
 		} else if field_found {
 			field_test :: #force_inline proc "contextless" (field_used: [^]byte, index: int) -> bool {
@@ -1199,12 +1284,12 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 
 			field_ptr := rawptr(uintptr(v.data) + offset)
 			field := any{field_ptr, type.id}
-			if err = unmarshal_value(p, field, flags); err != nil {
+			if err = unmarshal_value(p, field); err != nil {
 				unmarshal_field_error(&err, type.id, key, p.allocator)
 				return
 			}
 		} else {
-			if .Disallow_Unknown_Fields in flags {
+			if .Disallow_Unknown_Fields in p.flags {
 				return Unknown_Field_Error{
 					id    = v.id,
 					token = key_token,
@@ -1217,7 +1302,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 			}
 			// allows skipping unused struct fields
 			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
-				return syntax_error(p, skip_err, flags)
+				return syntax_error(p, skip_err)
 			}
 		}
 
@@ -1225,7 +1310,7 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 			break struct_loop
 		}
 	}
-	return unmarshal_close(p, end_token, flags)
+	return unmarshal_close(p, end_token)
 }
 
 @(private)
@@ -1272,7 +1357,7 @@ unmarshal_struct_field :: proc(key: string, ti: ^reflect.Type_Info, fields: #soa
 
 	if use_field_idx < 0 && key != "" {
 		for json_name, field_idx in json_names[:len(fields)] {
-			if json_name == "" && key == fields[field_idx].name {
+			if json_name == "" && key == fields[field_idx].name && !(fields[field_idx].is_using && key == "_") {
 				use_field_idx = field_idx
 				break
 			}
@@ -1321,7 +1406,7 @@ unmarshal_struct_field :: proc(key: string, ti: ^reflect.Type_Info, fields: #soa
 			if key == "" {
 				found = tagged && tag_value == ""
 			} else {
-				found = (json_name == "" && field.name == key) || json_name == key
+				found = (json_name == "" && field.name == key && !(field.is_using && key == "_")) || json_name == key
 			}
 			if found {
 				offset = field.offset
@@ -1343,7 +1428,7 @@ unmarshal_struct_field :: proc(key: string, ti: ^reflect.Type_Info, fields: #soa
 }
 
 @(private)
-unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: Token_Kind, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: Token_Kind) -> (err: Unmarshal_Error) {
 	start := p.curr_token
 	p.depth += 1
 	defer p.depth -= 1
@@ -1357,7 +1442,7 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 		raw_map.allocator = p.allocator
 	}
 
-	if .Reserve_Maps in flags {
+	if .Reserve_Maps in p.flags {
 		if n := uintptr(raw_map.len) + count_object_entries(p, end_token); n > 0 {
 			capacity := (n*100 + runtime.MAP_LOAD_FACTOR-1) / runtime.MAP_LOAD_FACTOR
 			if rerr := runtime.map_reserve_dynamic(raw_map, t.map_info, capacity); rerr != nil {
@@ -1383,7 +1468,7 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 
 	is_int_key := reflect.is_integer(t.key)
 
-	allow_dup := .Allow_Duplicate_Fields in flags
+	allow_dup := .Allow_Duplicate_Fields in p.flags
 	prescan   := allow_dup || raw_map.len > 0
 	dup: []bool
 	if prescan {
@@ -1394,7 +1479,7 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 
 	map_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
-		key, key_allocated := unmarshal_map_key(p, is_int_key, key_buf[:], flags) or_return
+		key, key_allocated := unmarshal_map_key(p, is_int_key, key_buf[:]) or_return
 		key_stored := false
 		defer if key_allocated && !key_stored {
 			delete(key, p.allocator)
@@ -1406,7 +1491,7 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 			return .Multiple_Use_Field
 		} else if skip {
 			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
-				return syntax_error(p, skip_err, flags)
+				return syntax_error(p, skip_err)
 			}
 			if parse_comma(p) {
 				break map_loop
@@ -1428,17 +1513,17 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 			}
 			mem.zero(value, t.value.size)
 		}
-		unmarshal_value(p, any{value, t.value.id}, flags) or_return
+		unmarshal_value(p, any{value, t.value.id}) or_return
 
 		if parse_comma(p) {
 			break map_loop
 		}
 	}
-	return unmarshal_close(p, end_token, flags)
+	return unmarshal_close(p, end_token)
 }
 
 @(private)
-unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte, flags: Unmarshal_Flags) -> (key: string, allocated: bool, err: Error) {
+unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte) -> (key: string, allocated: bool, err: Error) {
 	if !p.tok.validated && p.curr_token_err == .Invalid_String {
 		return "", false, .Invalid_String
 	}
@@ -1451,9 +1536,9 @@ unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte, flags: 
 	}
 
 	if key_err != nil {
-		err = syntax_error(p, key_err, flags)
+		err = syntax_error(p, key_err)
 	} else {
-		err = unmarshal_expect(p, .Colon, flags, .Expected_Colon_After_Key)
+		err = unmarshal_expect(p, .Colon, .Expected_Colon_After_Key)
 	}
 	if err != nil {
 		if allocated {
@@ -1484,7 +1569,11 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 			if number_text_kind(key, spec) != .Integer { return nil, false, false }
 			int_ok: bool
 			key_int, int_ok = parse_integer(key)
-			if !int_ok { return nil, false, false }
+			if !int_ok {
+				key_u, u_ok := parse_unsigned_integer(key)
+				if !u_ok { return nil, false, false }
+				key_int = i128(key_u)
+			}
 			key_ptr = &key_int
 		case: return nil, false, false
 	}
@@ -1497,7 +1586,7 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 }
 
 @(private)
-unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enumerated_Array, end_token: Token_Kind, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enumerated_Array, end_token: Token_Kind) -> (err: Unmarshal_Error) {
 	start := p.curr_token
 	p.depth += 1
 	defer p.depth -= 1
@@ -1506,7 +1595,7 @@ unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enu
 	index_type := reflect.type_info_base(t.index)
 	enum_type := index_type.variant.(^reflect.Type_Info_Enum)
 
-	allow_dup := .Allow_Duplicate_Fields in flags
+	allow_dup := .Allow_Duplicate_Fields in p.flags
 	dup: []bool
 	used_buf: [64]byte
 	used: []byte
@@ -1525,7 +1614,7 @@ unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enu
 
 	enumerated_array_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
-		key, key_allocated := unmarshal_map_key(p, true, key_buf[:], flags) or_return
+		key, key_allocated := unmarshal_map_key(p, true, key_buf[:]) or_return
 
 		index := -1
 		for name, i in enum_type.names {
@@ -1552,19 +1641,19 @@ unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enu
 
 		if skip {
 			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
-				return syntax_error(p, skip_err, flags)
+				return syntax_error(p, skip_err)
 			}
 		} else {
 			index_ptr := rawptr(uintptr(v.data) + uintptr(index*t.elem_size))
 			index_any := any{index_ptr, t.elem.id}
-			unmarshal_value(p, index_any, flags) or_return
+			unmarshal_value(p, index_any) or_return
 		}
 
 		if parse_comma(p) {
 			break enumerated_array_loop
 		}
 	}
-	return unmarshal_close(p, end_token, flags)
+	return unmarshal_close(p, end_token)
 }
 
 
@@ -1590,7 +1679,7 @@ count_object_entries :: proc(p: ^Parser, end_token: Token_Kind) -> (count: uintp
 }
 
 @(private)
-unmarshal_count_array :: proc(p: ^Parser, flags: Unmarshal_Flags) -> (length: uintptr, err: Error) {
+unmarshal_count_array :: proc(p: ^Parser) -> (length: uintptr, err: Error) {
 	if p.tok.validated {
 		return count_validated_array(p.tok.data, p.curr_token.offset, p.spec), nil
 	}
@@ -1603,7 +1692,7 @@ unmarshal_count_array :: proc(p: ^Parser, flags: Unmarshal_Flags) -> (length: ui
 		// With them it steps over what it can't parse, which a user unmarshaler may accept,
 		// and stops only at the end of input or past the nesting limit.
 		if skip_err := skip_value(p); skip_err != nil && (!have_custom || skip_err == .Max_Depth_Exceeded || p.curr_token.kind == .EOF) {
-			err = syntax_error(p, skip_err, flags)
+			err = syntax_error(p, skip_err)
 			p^ = p_backup
 			return 0, err
 		}
@@ -1623,14 +1712,14 @@ unmarshal_count_array :: proc(p: ^Parser, flags: Unmarshal_Flags) -> (length: ui
 }
 
 @(private)
-unmarshal_array :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
+unmarshal_array :: proc(p: ^Parser, v: any) -> (err: Unmarshal_Error) {
 	p.depth += 1
 	defer p.depth -= 1
 	if p.depth > MAX_DEPTH {
 		return .Max_Depth_Exceeded
 	}
 
-	base, elem, length := unmarshal_array_storage(p, v, flags) or_return
+	base, elem, length := unmarshal_array_storage(p, v) or_return
 
 	unmarshal_expect_token(p, .Open_Bracket)
 	for idx: uintptr = 0; p.curr_token.kind != .Close_Bracket; idx += 1 {
@@ -1639,22 +1728,22 @@ unmarshal_array :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err: Unm
 		}
 
 		elem_ptr := rawptr(uintptr(base) + idx*uintptr(elem.size))
-		unmarshal_value(p, any{elem_ptr, elem.id}, flags) or_return
+		unmarshal_value(p, any{elem_ptr, elem.id}) or_return
 
 		if parse_comma(p) {
 			break
 		}
 	}
-	return unmarshal_close(p, .Close_Bracket, flags)
+	return unmarshal_close(p, .Close_Bracket)
 }
 
 @(private)
-unmarshal_array_storage :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (base: rawptr, elem: ^reflect.Type_Info, length: uintptr, err: Unmarshal_Error) {
+unmarshal_array_storage :: proc(p: ^Parser, v: any) -> (base: rawptr, elem: ^reflect.Type_Info, length: uintptr, err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{id = v.id, token = p.curr_token}
 
 	ti := reflect.type_info_base(type_info_of(v.id))
 
-	length = unmarshal_count_array(p, flags) or_return
+	length = unmarshal_count_array(p) or_return
 
 	#partial switch t in ti.variant {
 	case ^reflect.Type_Info_Slice:
@@ -1696,29 +1785,32 @@ unmarshal_array_storage :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (
 
 	case ^reflect.Type_Info_Array:
 		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
-		if int(length) > t.count || .Disallow_Short_Arrays in flags && int(length) < t.count {
+		if int(length) > t.count || .Disallow_Short_Arrays in p.flags && int(length) < t.count {
 			err = UNSUPPORTED_TYPE
 			return
 		}
 
+		mem.zero(v.data, ti.size)
 		return v.data, t.elem, length, nil
 
 	case ^reflect.Type_Info_Enumerated_Array:
 		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
-		if int(length) > t.count || .Disallow_Short_Arrays in flags && int(length) < t.count {
+		if int(length) > t.count || .Disallow_Short_Arrays in p.flags && int(length) < t.count {
 			err = UNSUPPORTED_TYPE
 			return
 		}
 
+		mem.zero(v.data, ti.size)
 		return v.data, t.elem, length, nil
 
 	case ^reflect.Type_Info_Complex:
 		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
-		if int(length) > 2 || .Disallow_Short_Arrays in flags && int(length) < 2 {
+		if int(length) > 2 || .Disallow_Short_Arrays in p.flags && int(length) < 2 {
 			err = UNSUPPORTED_TYPE
 			return
 		}
 
+		mem.zero(v.data, ti.size)
 		switch ti.id {
 		case complex32:  return v.data, type_info_of(f16), 2, nil
 		case complex64:  return v.data, type_info_of(f32), 2, nil

@@ -11,6 +11,13 @@ Celsius :: distinct f64
 Word    :: distinct string
 Lazy    :: distinct int
 Box     :: distinct uintptr
+Bag     :: struct {
+	m: map[string]int,
+}
+Bag_Fields :: struct {
+	m: map[string]int,
+}
+Lenient :: distinct map[string]int
 
 registry: map[typeid]json.User_Unmarshaler
 
@@ -41,6 +48,14 @@ box_unmarshaler :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
 	return nil
 }
 
+bag_unmarshaler :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
+	return json.unmarshal_value(p, any{v.data, typeid_of(Bag_Fields)})
+}
+
+lenient_unmarshaler :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
+	return json.unmarshal_value(p, any{v.data, typeid_of(map[string]int)}, {.Allow_Duplicate_Fields})
+}
+
 @(init)
 register_unmarshalers :: proc "contextless" () {
 	context = runtime.default_context()
@@ -48,7 +63,9 @@ register_unmarshalers :: proc "contextless" () {
 	if json.register_user_unmarshaler(Celsius, celsius_unmarshaler) != .None ||
 	   json.register_user_unmarshaler(Word, word_unmarshaler) != .None ||
 	   json.register_user_unmarshaler(Lazy, lazy_unmarshaler) != .None ||
-	   json.register_user_unmarshaler(Box, box_unmarshaler) != .None {
+	   json.register_user_unmarshaler(Box, box_unmarshaler) != .None ||
+	   json.register_user_unmarshaler(Bag, bag_unmarshaler) != .None ||
+	   json.register_user_unmarshaler(Lenient, lenient_unmarshaler) != .None {
 		panic("registering the user unmarshalers failed")
 	}
 }
@@ -127,6 +144,28 @@ custom_values_in_unions :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil && is_s2 && s2.b != 0 && (^int)(uintptr(s2.b))^ == 7 && s2.y == "s", "%v %v", s, err)
 	free(rawptr(uintptr(s2.b)))
 	delete(s2.y)
+}
+
+@(test)
+flags_reach_nested_values :: proc(t: ^testing.T) {
+	DUP :: `{"m": {"a": 1, "a": 2}}`
+	bag: Bag
+	err := json.unmarshal_string(DUP, &bag, allocator = context.temp_allocator, flags = {.Allow_Duplicate_Fields})
+	testing.expectf(t, err == nil && len(bag.m) == 1 && bag.m["a"] == 2, "%v %v", bag, err)
+	bag = {}
+	err = json.unmarshal_string(DUP, &bag, allocator = context.temp_allocator)
+	testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field, "%v %v", bag, err)
+
+	S :: struct {
+		l: Lenient,
+		m: map[string]int,
+	}
+	s: S
+	err = json.unmarshal_string(`{"l": {"a": 1, "a": 2}, "m": {"b": 1}}`, &s, allocator = context.temp_allocator)
+	testing.expectf(t, err == nil && s.l["a"] == 2 && s.m["b"] == 1, "%v %v", s, err)
+	s = {}
+	err = json.unmarshal_string(`{"l": {"a": 1}, "m": {"b": 1, "b": 2}}`, &s, allocator = context.temp_allocator)
+	testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field, "%v %v", s, err)
 }
 
 @(test)

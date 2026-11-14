@@ -994,6 +994,8 @@ marshal_floats_round_trip :: proc(t: ^testing.T) {
 @(test)
 parse_integers_out_of_range :: proc(t: ^testing.T) {
 	// An integer outside i64 wraps to 64 bits in a `Value`, the same as when it is unmarshalled
+	// TODO-UPDATE-COMMENT: integers in u128 past i128 are now read whole and wrapped. Proposed: "An integer outside i64 wraps to 64 bits in a `Value`, the same as when it is unmarshalled into an `i64`. Past u128 only the digits that fit in an i128 are read."
+	// ---
 	// into an `i64`. Past i128 only the digits that fit in an i128 are read.
 	Case :: struct {
 		text:     string,
@@ -1011,6 +1013,8 @@ parse_integers_out_of_range :: proc(t: ^testing.T) {
 		{"0xFFFFFFFFFFFFFFFF",     .JSON5, -1},
 		{"0x10000000000000000",    .MJSON, 0},
 		{"1000000000000000000000000000000000000000000000", .JSON, 687399551400673280}, // 10^38, wrapped
+		{"170141183460469231731687303715884105729", .JSON, 1},
+		{"0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", .JSON5, -1},
 	}
 	only_integer :: proc(v: json.Value) -> (i: i64, ok: bool) {
 		array := v.(json.Array) or_return
