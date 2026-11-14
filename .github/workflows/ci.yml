@@ -127,6 +127,8 @@ jobs:
         run: |
           ./odin test tests/core/math/big_cutoffs -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:MATH_BIG_MUL_KARATSUBA_CUTOFF=0 -define:MATH_BIG_SQR_KARATSUBA_CUTOFF=0 -define:MATH_BIG_MUL_TOOM_CUTOFF=2 -define:MATH_BIG_SQR_TOOM_CUTOFF=2 -define:MATH_BIG_FACTORIAL_BINARY_SPLIT_CUTOFF=0
           ./odin test tests/core/math/big_cutoffs -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:MATH_BIG_MUL_KARATSUBA_CUTOFF=4 -define:MATH_BIG_SQR_KARATSUBA_CUTOFF=4 -define:MATH_BIG_MUL_TOOM_CUTOFF=9 -define:MATH_BIG_SQR_TOOM_CUTOFF=9 -define:MATH_BIG_FACTORIAL_BINARY_SPLIT_CUTOFF=40
+      - name: JSON user (un)marshaler tests
+        run: ./odin test tests/core/encoding/json/user_unmarshaler -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
       - name: Wycheproof tests
         run: ./odin test tests/core/crypto/wycheproof -vet -vet-tabs -strict-style -vet-style -vet-cast -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -o:speed
       - name: Noise Protocol Framework tests
@@ -329,6 +331,11 @@ jobs:
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           odin test tests/core/math/big_cutoffs -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:MATH_BIG_MUL_KARATSUBA_CUTOFF=0 -define:MATH_BIG_SQR_KARATSUBA_CUTOFF=0 -define:MATH_BIG_MUL_TOOM_CUTOFF=2 -define:MATH_BIG_SQR_TOOM_CUTOFF=2 -define:MATH_BIG_FACTORIAL_BINARY_SPLIT_CUTOFF=0 %ODIN_TARGET% || exit /b 1
           odin test tests/core/math/big_cutoffs -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:MATH_BIG_MUL_KARATSUBA_CUTOFF=4 -define:MATH_BIG_SQR_KARATSUBA_CUTOFF=4 -define:MATH_BIG_MUL_TOOM_CUTOFF=9 -define:MATH_BIG_SQR_TOOM_CUTOFF=9 -define:MATH_BIG_FACTORIAL_BINARY_SPLIT_CUTOFF=40 %ODIN_TARGET%
+      - name: JSON user (un)marshaler tests
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          odin test tests/core/encoding/json/user_unmarshaler -vet -vet-tabs -strict-style -vet-style -warnings-as-errors -disallow-do -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true %ODIN_TARGET%
       - name: Wycheproof tests
         shell: cmd
         run: |

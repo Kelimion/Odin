@@ -2100,3 +2100,313 @@ review_mjson_empty_root :: proc(t: ^testing.T) {
 		testing.expectf(t, uerr != nil, "%v: %v", spec, uerr)
 	}
 }
+
+@(test)
+review_marshal_shapes :: proc(t: ^testing.T) {
+	expect_marshal :: proc(t: ^testing.T, v: any, opt: json.Marshal_Options, want: string, loc := #caller_location) {
+		data, err := json.marshal(v, opt, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == want, "%v: %s %v, want %s", v.id, data, err, want, loc = loc)
+		testing.expectf(t, json.is_valid(data, opt.spec), "%v: %s is not valid", v.id, data, loc = loc)
+	}
+
+	Shifted :: enum {A = 1, B, C}
+	Negative :: enum {M = -1, Z, P}
+	Gappy :: enum {A = 2, B = 4}
+	shifted := [Shifted]int{.A = 10, .B = 20, .C = 30}
+	expect_marshal(t, shifted, {}, `{"A":10,"B":20,"C":30}`)
+	expect_marshal(t, shifted, {pretty = true}, "{\n\t\"A\": 10,\n\t\"B\": 20,\n\t\"C\": 30\n}")
+	shifted_back: [Shifted]int
+	err := json.unmarshal_string(`{"A":10,"B":20,"C":30}`, &shifted_back, allocator = context.temp_allocator)
+	testing.expectf(t, err == nil && shifted_back == shifted, "%v %v", shifted_back, err)
+	expect_marshal(t, [Negative]int{.M = 10, .Z = 20, .P = 30}, {}, `{"M":10,"Z":20,"P":30}`)
+	expect_marshal(t, #sparse[Gappy]int{.A = 1, .B = 2}, {}, `{"A":1,"B":2}`)
+
+	Nothing :: struct {}
+	Optional :: struct {
+		s: string `json:",omitempty"`,
+	}
+	Lead :: struct {
+		using _: Nothing,
+		a: int,
+	}
+	Tail :: struct {
+		a: int,
+		using _: Nothing,
+	}
+	Omitted :: struct {
+		using _: Optional,
+		a: int,
+	}
+	expect_marshal(t, Lead{a = 1}, {}, `{"a":1}`)
+	expect_marshal(t, Tail{a = 1}, {}, `{"a":1}`)
+	expect_marshal(t, Omitted{a = 1}, {}, `{"a":1}`)
+	Inner :: struct {
+		x, y: int,
+	}
+	Outer :: struct {
+		using _: Inner,
+		z: int,
+	}
+	Flat :: struct {
+		x, y, z: int,
+	}
+	for opt in ([]json.Marshal_Options{{}, {pretty = true}, {spec = .JSON5, pretty = true}, {spec = .MJSON, pretty = true}}) {
+		flat, ferr := json.marshal(Flat{1, 2, 3}, opt, context.temp_allocator)
+		testing.expectf(t, ferr == nil, "%v", ferr)
+		expect_marshal(t, Outer{x = 1, y = 2, z = 3}, opt, string(flat))
+	}
+	Tagged :: struct {
+		using _: Inner `json:"in"`,
+		w: int,
+	}
+	expect_marshal(t, Tagged{x = 6, w = 1}, {}, `{"in":{"x":6,"y":0},"w":1}`)
+
+	Padded :: struct {
+		a: u8,
+		_: [3]u8,
+		b: u32,
+		_: [4]u8,
+	}
+	expect_marshal(t, Padded{a = 1, b = 2}, {}, `{"a":1,"b":2}`)
+	padded_back: Padded
+	err = json.unmarshal_string(`{"a":1,"b":2}`, &padded_back, allocator = context.temp_allocator)
+	testing.expectf(t, err == nil && padded_back.a == 1 && padded_back.b == 2, "%v %v", padded_back, err)
+	Named_Blank :: struct {
+		_: int `json:"pad"`,
+	}
+	expect_marshal(t, Named_Blank{}, {}, `{"pad":0}`)
+
+	Wide_Text :: struct {
+		a: string16,
+		b: int,
+	}
+	wide_map := make(map[string16]int, context.temp_allocator)
+	wide_map["k"] = 1
+	cwide_map := make(map[cstring16]int, context.temp_allocator)
+	cwide_map["k"] = 1
+	for v in ([]any{string16("abc"), cstring16("abc"), Wide_Text{a = "abc", b = 1}, wide_map, cwide_map}) {
+		for sort in ([]bool{false, true}) {
+			data, merr := json.marshal(v, {sort_maps_by_key = sort}, context.temp_allocator)
+			testing.expectf(t, merr == json.Marshal_Data_Error.Unsupported_Type, "%v %v: %s %v", v.id, sort, data, merr)
+		}
+	}
+
+	HEX_CASES :: []struct{v: json.Integer, spec: json.Specification, text: string}{
+		{255, .JSON5, "0xff"},
+		{255, .MJSON, "0xff"},
+		{0,   .JSON5, "0x0"},
+		{-1,  .JSON5, "-1"},
+		{min(i64), .JSON5, "-9223372036854775808"},
+		{255, .JSON,  "255"},
+	}
+	for c in HEX_CASES {
+		text, perr := json.unparse(c.v, {spec = c.spec, write_uint_as_hex = true}, context.temp_allocator)
+		testing.expectf(t, perr == nil && text == c.text && json.is_valid(transmute([]byte)text, c.spec), "%v %v: %s %v", c.v, c.spec, text, perr)
+	}
+
+	signed_keys := make(map[int]string, context.temp_allocator)
+	signed_keys[10] = "a"
+	signed_keys[-2] = "b"
+	signed_keys[3] = "c"
+	expect_marshal(t, signed_keys, {sort_maps_by_key = true}, `{"-2":"b","3":"c","10":"a"}`)
+	unsigned_keys := make(map[u64]int, context.temp_allocator)
+	unsigned_keys[max(u64)] = 1
+	unsigned_keys[0] = 2
+	unsigned_keys[9] = 3
+	expect_marshal(t, unsigned_keys, {sort_maps_by_key = true}, `{"0":2,"9":3,"18446744073709551615":1}`)
+	wide_keys := make(map[u128]int, context.temp_allocator)
+	wide_keys[1 << 127] = 1
+	wide_keys[1] = 2
+	expect_marshal(t, wide_keys, {sort_maps_by_key = true}, `{"1":2,"170141183460469231731687303715884105728":1}`)
+	endian_keys := make(map[i16be]int, context.temp_allocator)
+	endian_keys[300] = 1
+	endian_keys[-300] = 2
+	expect_marshal(t, endian_keys, {sort_maps_by_key = true}, `{"-300":2,"300":1}`)
+	string_keys := make(map[string]int, context.temp_allocator)
+	string_keys["b"] = 1
+	string_keys["a"] = 2
+	string_keys["10"] = 3
+	expect_marshal(t, string_keys, {sort_maps_by_key = true}, `{"10":3,"a":2,"b":1}`)
+}
+
+@(test)
+review_marshal_allocation :: proc(t: ^testing.T) {
+	keys := make(map[string]int, context.temp_allocator)
+	keys["b"] = 1
+	keys["a"] = 2
+	obj := make(json.Object, context.temp_allocator)
+	obj["b"] = json.Integer(1)
+	obj["a"] = json.Integer(2)
+
+	for sort in ([]bool{false, true}) {
+		for n in 0..<8 {
+			fa := Failing_Allocator{backing = context.allocator, left = n}
+			data, err := json.marshal(keys, {sort_maps_by_key = sort}, failing_allocator(&fa))
+			if err == nil {
+				testing.expectf(t, string(data) == `{"b":1,"a":2}` || string(data) == `{"a":2,"b":1}`, "%v %d: %s", sort, n, data)
+				delete(data, failing_allocator(&fa))
+			} else {
+				testing.expectf(t, err == runtime.Allocator_Error.Out_Of_Memory && data == nil, "%v %d: %v", sort, n, err)
+			}
+
+			fa = Failing_Allocator{backing = context.allocator, left = n}
+			text, perr := json.unparse(obj, {sort_maps_by_key = sort}, failing_allocator(&fa))
+			if perr == nil {
+				delete(text, failing_allocator(&fa))
+			} else {
+				testing.expectf(t, perr == runtime.Allocator_Error.Out_Of_Memory, "%v %d: %v", sort, n, perr)
+			}
+		}
+	}
+
+	{
+		fa := Failing_Allocator{backing = context.allocator, left = 0}
+		context.temp_allocator = failing_allocator(&fa)
+		data, err := json.marshal(keys, {sort_maps_by_key = true})
+		testing.expectf(t, err == runtime.Allocator_Error.Out_Of_Memory && data == nil, "%s %v", data, err)
+		text, perr := json.unparse(obj, {sort_maps_by_key = true})
+		testing.expectf(t, perr == runtime.Allocator_Error.Out_Of_Memory && text == "", "%s %v", text, perr)
+	}
+
+	{
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		context.temp_allocator = mem.tracking_allocator(&track)
+		data, err := json.marshal(keys, {sort_maps_by_key = true})
+		testing.expectf(t, err == nil && string(data) == `{"a":2,"b":1}`, "%s %v", data, err)
+		delete(data)
+		text, perr := json.unparse(obj, {sort_maps_by_key = true})
+		testing.expectf(t, perr == nil && text == `{"a":2,"b":1}`, "%s %v", text, perr)
+		delete(text)
+		testing.expectf(t, len(track.allocation_map) == 0, "%d temp allocations left", len(track.allocation_map))
+	}
+}
+
+@(test)
+review_marshal_minor :: proc(t: ^testing.T) {
+	expect_marshal :: proc(t: ^testing.T, v: any, opt: json.Marshal_Options, want: string, loc := #caller_location) {
+		data, err := json.marshal(v, opt, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == want, "%v: %q %v, want %q", v.id, data, err, want, loc = loc)
+		testing.expectf(t, json.is_valid(data, opt.spec), "%v: %q is not valid", v.id, data, loc = loc)
+	}
+	expect_unsupported :: proc(t: ^testing.T, v: any, loc := #caller_location) {
+		data, err := json.marshal(v, {}, context.temp_allocator)
+		testing.expectf(t, err == json.Marshal_Data_Error.Unsupported_Type, "%v: %q %v", v.id, data, err, loc = loc)
+	}
+
+	expect_marshal(t, f16le(1.5),   {}, "1.5")
+	expect_marshal(t, f16be(-0.25), {}, "-0.25")
+	expect_marshal(t, f32le(0.5),   {}, "0.5")
+	expect_marshal(t, f32be(2),     {}, "2.0")
+	expect_marshal(t, f64le(-3.75), {}, "-3.75")
+	expect_marshal(t, f64be(1e300), {}, "1e+300")
+	expect_marshal(t, f16le(0.1),   {}, "0.1")
+	expect_marshal(t, f16be(0.1),   {}, "0.1")
+	expect_marshal(t, f32le(0.1),   {}, "0.1")
+	expect_marshal(t, f32be(0.1),   {}, "0.1")
+	expect_marshal(t, f32be(math.inf_f32(1)), {spec = .JSON5}, "Infinity")
+	_, nan_err := json.marshal(f64be(math.nan_f64()), {}, context.temp_allocator)
+	testing.expectf(t, nan_err != nil, "%v", nan_err)
+	Endian_Floats :: struct {
+		a: f16be,
+		b: f32le,
+		c: f64be,
+	}
+	expect_marshal(t, Endian_Floats{1, 2.5, -8}, {}, `{"a":1.0,"b":2.5,"c":-8.0}`)
+
+	for spec in ([]json.Specification{.JSON5, .MJSON}) {
+		hex := json.Marshal_Options{spec = spec, write_uint_as_hex = true}
+		expect_marshal(t, uint(255),    hex, "0xff")
+		expect_marshal(t, uintptr(255), hex, "0xff")
+		expect_marshal(t, u8(255),      hex, "0xff")
+		expect_marshal(t, u16be(255),   hex, "0xff")
+		expect_marshal(t, u32le(4096),  hex, "0x1000")
+		expect_marshal(t, u64be(0),     hex, "0x0")
+		expect_marshal(t, max(u128),    hex, "0xffffffffffffffffffffffffffffffff")
+		expect_marshal(t, i32le(-1),    hex, "-1")
+		expect_marshal(t, i16be(255),   hex, "255")
+		expect_marshal(t, int(255),     hex, "255")
+		expect_marshal(t, u16be(255), {spec = spec}, "255")
+	}
+	expect_marshal(t, uint(255), {write_uint_as_hex = true}, "255")
+	expect_marshal(t, u32be(max(u32)), {}, "4294967295")
+	expect_marshal(t, i64le(min(i64)), {}, "-9223372036854775808")
+	expect_marshal(t, max(u128), {}, "340282366920938463463374607431768211455")
+	expect_marshal(t, min(i128), {}, "-170141183460469231731687303715884105728")
+	expect_marshal(t, i8(-128), {}, "-128")
+
+	Name :: distinct string
+	Omit :: struct {
+		n:  Name           `json:",omitempty"`,
+		fc: [dynamic; 4]int `json:",omitempty"`,
+	}
+	expect_marshal(t, Omit{}, {}, "{}")
+	full := Omit{n = "x"}
+	append(&full.fc, 7)
+	expect_marshal(t, full, {}, `{"n":"x","fc":[7]}`)
+
+	expect_marshal(t, []any{1}, {}, "[1]")
+	expect_marshal(t, [1]any{"x"}, {}, `["x"]`)
+
+	Raw :: struct #raw_union {
+		i: i32,
+		f: f32,
+	}
+	Holds_Raw :: struct {
+		r: Raw,
+	}
+	Uses_Raw :: struct {
+		using _: Raw,
+		a: int,
+	}
+	expect_unsupported(t, Raw{i = 1})
+	expect_unsupported(t, Holds_Raw{})
+	expect_unsupported(t, Uses_Raw{a = 1})
+
+	Small :: distinct u8
+	Coded :: enum Small {X = 200, Y}
+	Plain :: enum {A, B}
+	expect_marshal(t, Coded.Y, {}, "201")
+	expect_marshal(t, Coded.Y, {use_enum_names = true}, `"Y"`)
+	expect_marshal(t, Coded.X, {spec = .JSON5, write_uint_as_hex = true}, "0xc8")
+	expect_marshal(t, Coded(7), {use_enum_names = true}, "7")
+	expect_marshal(t, Plain.B, {use_enum_names = true, spec = .JSON5}, `"B"`)
+	expect_marshal(t, Plain(-3), {use_enum_names = true}, "-3")
+	expect_marshal(t, Plain.B, {spec = .JSON5, write_uint_as_hex = true}, "1")
+
+	Empty :: struct {}
+	Nested :: struct {
+		a: []int,
+		m: map[string]int,
+		e: Empty,
+	}
+	nested_object := make(json.Object, context.temp_allocator)
+	nested_object["a"] = json.Array{}
+	empty_map: map[string]int
+	unparse_cases := [2]struct{v: json.Value, text: string}{
+		{json.Array{}, "[]"},
+		{json.Object{}, "{}"},
+	}
+	for spec in ([]json.Specification{.JSON, .JSON5}) {
+		pretty := json.Marshal_Options{spec = spec, pretty = true}
+		expect_marshal(t, Empty{}, pretty, "{}")
+		expect_marshal(t, []int{}, pretty, "[]")
+		expect_marshal(t, empty_map, pretty, "{}")
+		expect_marshal(t, [][]int{{}}, pretty, "[\n\t[]\n]")
+		expect_marshal(t, Nested{}, pretty, "{\n\t\"a\": [],\n\t\"m\": {},\n\t\"e\": {}\n}")
+		expect_marshal(t, []int{1, 2}, pretty, "[\n\t1,\n\t2\n]")
+		expect_marshal(t, [][]int{{}, {1}}, pretty, "[\n\t[],\n\t[\n\t\t1\n\t]\n]")
+		for c in unparse_cases {
+			text, err := json.unparse(c.v, pretty, context.temp_allocator)
+			testing.expectf(t, err == nil && text == c.text, "%v: %q %v", spec, text, err)
+		}
+		text, err := json.unparse(nested_object, pretty, context.temp_allocator)
+		testing.expectf(t, err == nil && text == "{\n\t\"a\": []\n}", "%v: %q %v", spec, text, err)
+	}
+	mjson := json.Marshal_Options{spec = .MJSON, pretty = true}
+	expect_marshal(t, Nested{}, mjson, "a: []\nm: {}\ne: {}")
+	expect_marshal(t, Empty{}, mjson, "{}")
+	expect_marshal(t, [][]int{{}}, mjson, "[\n\t[]\n]")
+	expect_marshal(t, Nested{}, {}, `{"a":[],"m":{},"e":{}}`)
+}

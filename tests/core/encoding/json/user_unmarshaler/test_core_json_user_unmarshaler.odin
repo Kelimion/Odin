@@ -1,6 +1,7 @@
 package test_core_json_user_unmarshaler
 
 import "core:encoding/json"
+import "core:io"
 import "core:strings"
 import "core:testing"
 import "base:runtime"
@@ -18,8 +19,26 @@ Bag_Fields :: struct {
 	m: map[string]int,
 }
 Lenient :: distinct map[string]int
+Kind    :: enum {A, B}
+Shout   :: enum {Quiet, Loud}
 
 registry: map[typeid]json.User_Unmarshaler
+marshal_registry: map[typeid]json.User_Marshaler
+
+int_marshaler :: proc(w: io.Writer, v: any, opt: ^json.Marshal_Options) -> json.Marshal_Error {
+	io.write_string(w, `"INT"`) or_return
+	return nil
+}
+
+string_marshaler :: proc(w: io.Writer, v: any, opt: ^json.Marshal_Options) -> json.Marshal_Error {
+	io.write_string(w, `"STRING"`) or_return
+	return nil
+}
+
+shout_marshaler :: proc(w: io.Writer, v: any, opt: ^json.Marshal_Options) -> json.Marshal_Error {
+	io.write_string(w, `"SHOUT"`) or_return
+	return nil
+}
 
 celsius_unmarshaler :: proc(p: ^json.Parser, v: any) -> json.Unmarshal_Error {
 	return json.unmarshal_value(p, any{v.data, typeid_of(f64)})
@@ -67,6 +86,12 @@ register_unmarshalers :: proc "contextless" () {
 	   json.register_user_unmarshaler(Bag, bag_unmarshaler) != .None ||
 	   json.register_user_unmarshaler(Lenient, lenient_unmarshaler) != .None {
 		panic("registering the user unmarshalers failed")
+	}
+	json.set_user_marshalers(&marshal_registry)
+	if json.register_user_marshaler(int, int_marshaler) != .None ||
+	   json.register_user_marshaler(string, string_marshaler) != .None ||
+	   json.register_user_marshaler(Shout, shout_marshaler) != .None {
+		panic("registering the user marshalers failed")
 	}
 }
 
@@ -173,4 +198,24 @@ custom_value_that_reads_nothing :: proc(t: ^testing.T) {
 	ls: []Lazy
 	err := json.unmarshal_string(`[1]`, &ls, .SJSON, context.temp_allocator)
 	testing.expectf(t, err == json.Error.Unexpected_Token, "%v %v", ls, err)
+}
+
+@(test)
+enums_bypass_base_type_marshalers :: proc(t: ^testing.T) {
+	expect :: proc(t: ^testing.T, v: any, opt: json.Marshal_Options, want: string, loc := #caller_location) {
+		data, err := json.marshal(v, opt, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == want, "%v: %q %v, want %q", v.id, data, err, want, loc = loc)
+	}
+	expect(t, 5, {}, `"INT"`)
+	expect(t, "x", {}, `"STRING"`)
+	expect(t, Kind.B, {}, "1")
+	expect(t, Kind.B, {use_enum_names = true}, `"B"`)
+	expect(t, Kind(9), {use_enum_names = true}, "9")
+	expect(t, Shout.Loud, {}, `"SHOUT"`)
+	expect(t, Shout.Loud, {use_enum_names = true}, `"SHOUT"`)
+	S :: struct {
+		k: Kind,
+		n: int,
+	}
+	expect(t, S{.B, 1}, {use_enum_names = true}, `{"k":"B","n":"INT"}`)
 }
