@@ -186,6 +186,60 @@ string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, clo
 	return len(s), false
 }
 
+@(private="file")
+unicode_space_width :: proc "contextless" (s: string, i: int) -> int #no_bounds_check {
+	switch s[i] {
+	case 0xc2:
+		if i+1 < len(s) && s[i+1] == 0xa0 {
+			return 2
+		}
+	case 0xe1:
+		if i+2 < len(s) && s[i+1] == 0x9a && s[i+2] == 0x80 {
+			return 3
+		}
+	case 0xe2:
+		if i+2 < len(s) {
+			switch s[i+1] {
+			case 0x80:
+				switch s[i+2] {
+				case 0x80..=0x8a, 0xa8, 0xa9, 0xaf:
+					return 3
+				}
+			case 0x81:
+				if s[i+2] == 0x9f {
+					return 3
+				}
+			}
+		}
+	case 0xe3:
+		if i+2 < len(s) && s[i+1] == 0x80 && s[i+2] == 0x80 {
+			return 3
+		}
+	case 0xef:
+		if i+2 < len(s) && s[i+1] == 0xbb && s[i+2] == 0xbf {
+			return 3
+		}
+	}
+	return 0
+}
+
+@(private="file")
+line_comment_end :: proc "contextless" (s: string, i: int) -> int #no_bounds_check {
+	i := i
+	for i < len(s) {
+		switch s[i] {
+		case '\n', '\r':
+			return i
+		case 0xe2:
+			if i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xa8 || s[i+2] == 0xa9) {
+				return i
+			}
+		}
+		i += 1
+	}
+	return i
+}
+
 @(require_results)
 get_token :: proc(t: ^Tokenizer) -> (token: Token, err: Error) #no_bounds_check {
 	for {
@@ -336,11 +390,10 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 				t.line += 1
 				t.curr_line_offset = i
 				i += 1
-			case 0xe2, 0xef:
+			case 0xc2, 0xe1, 0xe2, 0xe3, 0xef:
 				if t.spec != .JSON {
-					switch t.data[i:min(i+3, len(t.data))] {
-					case "\u2028", "\u2029", "\uFEFF":
-						i += 3
+					if w := unicode_space_width(t.data, i); w > 0 {
+						i += w
 						continue loop
 					}
 				}
@@ -351,15 +404,6 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 		}
 		if i != t.offset {
 			move_to(t, i)
-		}
-	}
-
-	skip_to_next_line :: proc(t: ^Tokenizer) {
-		for t.offset < len(t.data) {
-			r := next_rune(t)
-			if r == '\n' {
-				return
-			}
 		}
 	}
 
@@ -494,14 +538,16 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 			switch t.r {
 			case '/':
 				// Single-line comments
-				skip_to_next_line(t)
+				move_to(t, line_comment_end(t.data, t.offset))
 				comment = true
 				return
 			case '*':
 				// None-nested multi-line comments
 				for t.offset < len(t.data) {
-					if next_rune(t) == '*' {
-						if next_rune(t) == '/' {
+					r := next_rune(t)
+					for r == '*' {
+						r = next_rune(t)
+						if r == '/' {
 							next_rune(t)
 							comment = true
 							return
@@ -965,20 +1011,14 @@ count_validated_array :: proc(s: string, open: int, spec: Specification) -> (cou
 
 		case '/':
 			if i+1 < len(s) && s[i+1] == '*' {
-				for i += 1; i < len(s); /**/ {
-					i += rune_width(s, i)
-					if i < len(s) && s[i] == '*' {
-						i += 1
-						if i < len(s) && s[i] == '/' {
-							i += 1
-							break
-						}
+				for i += 2; i < len(s); i += 1 {
+					if s[i] == '*' && i+1 < len(s) && s[i+1] == '/' {
+						i += 2
+						break
 					}
 				}
 			} else {
-				for i < len(s) && s[i] != '\n' {
-					i += 1
-				}
+				i = line_comment_end(s, i)
 			}
 
 		case:

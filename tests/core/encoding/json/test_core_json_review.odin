@@ -499,3 +499,31 @@ review_unvalidated_key_with_tab :: proc(t: ^testing.T) {
 		testing.expectf(t, err == nil && len(m) == 1, "%v: %v, %v", spec, m, err)
 	}
 }
+
+@(test)
+review_json5_comments_and_spaces :: proc(t: ^testing.T) {
+	VALID := []string{
+		"/***/1", "/* a **/ 1", "[1,/***/2]", "[1,/* ] **/2]",
+		"// c\r1", "[1,// c\r2]", "[1,// ]\r2]", "[1,// c\u20282]", "[1,// c\u20292]", "[1,// c\r\n2]",
+		"[1,\u00a02]", "[1,\u16802]", "[1,\u20002]", "[1,\u20052]", "[1,\u200a2]", "[1,\u202f2]", "[1,\u205f2]", "[1,\u30002]",
+		"[1,\u20282]", "[1,\u20292]", "[1,\ufeff2]", "\u00a0[1,2]\u3000",
+	}
+	for src in VALID {
+		expect_document(t, src, .JSON5, true)
+		expect_document(t, src, .SJSON, true)
+		expect_document(t, src, .JSON, false)
+	}
+	for src in ([]string{"/*/1", "/* */*/1", "[1,// c\n\r", "[1,\u200b2]", "[1,\u00852]", "[1,\u180e2]", "[1,\u20302]", "[1,\u20602]", "[1,\u2fff2]", "[1,\u30012]", "[1,\u00a12]"}) {
+		expect_document(t, src, .JSON5, false)
+	}
+
+	for src in ([]string{"[1,/***/2]", "[1,/* ] **/2]", "[1,/*/ ] */2]", "[1,// ]\r2]", "[1,// ]\u20282]", "[1,// ]\u20292]", "[1,\u30002]"}) {
+		for spec in ([]json.Specification{.JSON5, .SJSON}) {
+			for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+				x: []int
+				err := json.unmarshal_string(src, &x, spec, context.temp_allocator, flags)
+				testing.expectf(t, err == nil && len(x) == 2 && x[0] == 1 && x[1] == 2, "%v %q %v: %v, %v", spec, src, flags, x, err)
+			}
+		}
+	}
+}
