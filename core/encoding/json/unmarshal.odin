@@ -47,6 +47,8 @@ Unmarshal_Flag :: enum {
 	// Count an object's entries and reserve the map once rather than growing it
 	Reserve_Maps,
 
+	// TODO-UPDATE-COMMENT: maps and enumerated arrays now report duplicates too, and with the flag earlier occurrences are skipped instead of merged. Proposed: "Accept duplicate keys in an object (struct fields, map keys, enumerated array indices) rather than returning `.Multiple_Use_Field`. Only the last occurrence is unmarshalled; the object's keys are scanned first to find it."
+	// ---
 	// Accept duplicate keys for a struct field, the last value winning, rather than returning `.Multiple_Use_Field`
 	Allow_Duplicate_Fields,
 
@@ -1001,6 +1003,137 @@ unmarshal_object_key :: proc(p: ^Parser, key_buf: []byte, flags: Unmarshal_Flags
 }
 
 @(private)
+scan_duplicate_keys :: proc(p: ^Parser, ti: ^reflect.Type_Info, end_token: Token_Kind, last_wins: bool) -> (dup: []bool, err: Error) {
+	backup := p^
+	defer p^ = backup
+
+	ids: [dynamic]int
+	ids.allocator = p.allocator
+	defer delete(ids)
+
+	string_ids: map[string]int
+	string_ids.allocator = p.allocator
+	integer_ids: map[[16]byte]int
+	integer_ids.allocator = p.allocator
+	defer {
+		for key in string_ids {
+			delete(key, p.allocator)
+		}
+		delete(string_ids)
+		delete(integer_ids)
+	}
+
+	fields: #soa[]reflect.Struct_Field
+	json_names: [^]string
+	json_resolved, using_count := 0, -1
+	string_keys := false
+	#partial switch info in ti.variant {
+	case ^reflect.Type_Info_Struct:
+		fields = reflect.struct_fields_zipped(ti.id)
+		json_names = ([^]string)(intrinsics.alloca(len(fields)*size_of(string) + 1, align_of(string)))
+	case ^reflect.Type_Info_Map:
+		string_keys = !reflect.is_integer(info.key)
+	}
+
+	for p.curr_token.kind != end_token {
+		key_buf: [256]byte = ---
+		key: string
+		allocated: bool
+		key_err: Error
+		if string_keys {
+			key, key_err = parse_object_key(p, p.allocator)
+			allocated = key_err == nil
+		} else {
+			key, allocated, key_err = parse_object_key_view(p, key_buf[:])
+		}
+		if key_err == .Out_Of_Memory {
+			return nil, .Out_Of_Memory
+		} else if key_err != nil {
+			break
+		}
+
+		id := -1
+		#partial switch info in ti.variant {
+		case ^reflect.Type_Info_Struct:
+			_, _, index, found := unmarshal_struct_field(key, ti, fields, json_names, &json_resolved, &using_count)
+			if found {
+				id = index
+			}
+		case ^reflect.Type_Info_Enumerated_Array:
+			enum_type := reflect.type_info_base(info.index).variant.(^reflect.Type_Info_Enum)
+			for name, i in enum_type.names {
+				if key == name {
+					id = int(enum_type.values[i] - info.min_value)
+					break
+				}
+			}
+		case ^reflect.Type_Info_Map:
+			if string_keys {
+				_, value_ptr, just_inserted, map_err := map_entry(&string_ids, key)
+				if map_err != nil {
+					delete(key, p.allocator)
+					return nil, .Out_Of_Memory
+				}
+				if just_inserted {
+					value_ptr^ = len(string_ids) - 1
+					allocated = false
+				}
+				id = value_ptr^
+			} else if number_text_kind(key, p.spec) == .Integer {
+				key_int, int_ok := parse_integer(key)
+				storage: [16]byte
+				if int_ok && assign_int(any{&storage, info.key.id}, key_int) {
+					_, value_ptr, just_inserted, map_err := map_entry(&integer_ids, storage)
+					if map_err != nil {
+						if allocated {
+							delete(key, p.allocator)
+						}
+						return nil, .Out_Of_Memory
+					}
+					if just_inserted {
+						value_ptr^ = len(integer_ids) - 1
+					}
+					id = value_ptr^
+				}
+			}
+		}
+		if allocated {
+			delete(key, p.allocator)
+		}
+		if _, append_err := append(&ids, id); append_err != nil {
+			return nil, .Out_Of_Memory
+		}
+
+		if expect_token(p, .Colon) != nil || skip_value(p, !p.tok.validated) != nil || parse_comma(p) {
+			break
+		}
+	}
+
+	max_id := -1
+	for id in ids {
+		max_id = max(max_id, id)
+	}
+	seen, seen_err := make([]bool, max_id + 1, p.allocator)
+	if seen_err != nil {
+		return nil, .Out_Of_Memory
+	}
+	defer delete(seen, p.allocator)
+	dup_err: runtime.Allocator_Error
+	dup, dup_err = make([]bool, len(ids), p.allocator)
+	if dup_err != nil {
+		return nil, .Out_Of_Memory
+	}
+	for k in 0..<len(ids) {
+		i := len(ids) - 1 - k if last_wins else k
+		if id := ids[i]; id >= 0 {
+			dup[i] = seen[id]
+			seen[id] = true
+		}
+	}
+	return
+}
+
+@(private)
 unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: Token_Kind, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
 	p.depth += 1
 	defer p.depth -= 1
@@ -1021,6 +1154,13 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 	using_count := -1
 	using_used:  [^]byte
 
+	dup: []bool
+	if .Allow_Duplicate_Fields in flags {
+		dup = scan_duplicate_keys(p, ti, end_token, true) or_return
+	}
+	defer delete(dup, p.allocator)
+	ordinal := 0
+
 	struct_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
 		key_token := p.curr_token
@@ -1028,6 +1168,8 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 		defer if key_allocated {
 			delete(key, p.allocator)
 		}
+		skip := ordinal < len(dup) && dup[ordinal]
+		ordinal += 1
 
 		offset, type, field_index, field_found := unmarshal_struct_field(key, ti, fields, json_names, &json_resolved, &using_count)
 		if field_used != nil && using_used == nil && using_count > 0 {
@@ -1036,7 +1178,11 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 			intrinsics.mem_zero(using_used, using_used_bytes)
 		}
 
-		if field_found {
+		if skip {
+			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
+				return syntax_error(p, skip_err, flags)
+			}
+		} else if field_found {
 			field_test :: #force_inline proc "contextless" (field_used: [^]byte, index: int) -> bool {
 				bit := byte(1) << uint(index&7)
 				prev_set := field_used[index/8] & bit != 0
@@ -1237,6 +1383,15 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 
 	is_int_key := reflect.is_integer(t.key)
 
+	allow_dup := .Allow_Duplicate_Fields in flags
+	prescan   := allow_dup || raw_map.len > 0
+	dup: []bool
+	if prescan {
+		dup = scan_duplicate_keys(p, reflect.type_info_base(type_info_of(v.id)), end_token, allow_dup) or_return
+	}
+	defer delete(dup, p.allocator)
+	ordinal := 0
+
 	map_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
 		key, key_allocated := unmarshal_map_key(p, is_int_key, key_buf[:], flags) or_return
@@ -1244,15 +1399,34 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 		defer if key_allocated && !key_stored {
 			delete(key, p.allocator)
 		}
+		skip := ordinal < len(dup) && dup[ordinal]
+		ordinal += 1
 
-		value: rawptr
-		inserted: bool
-		key_stored, value, inserted = unmarshal_map_insert(raw_map, t, key, raw_data(elem_backing), p.spec)
+		if skip && !allow_dup {
+			return .Multiple_Use_Field
+		} else if skip {
+			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
+				return syntax_error(p, skip_err, flags)
+			}
+			if parse_comma(p) {
+				break map_loop
+			}
+			continue
+		}
+
+		value, fresh, inserted := unmarshal_map_insert(raw_map, t, key, raw_data(elem_backing), p.spec)
 		if !inserted {
 			return Unsupported_Type_Error{id = v.id, token = start}
 		}
 		if value == nil {
 			return .Out_Of_Memory
+		}
+		key_stored = fresh && !is_int_key
+		if !fresh {
+			if !prescan {
+				return .Multiple_Use_Field
+			}
+			mem.zero(value, t.value.size)
 		}
 		unmarshal_value(p, any{value, t.value.id}, flags) or_return
 
@@ -1291,7 +1465,7 @@ unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte, flags: 
 }
 
 @(private)
-unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, value: rawptr, spec: Specification) -> (stored: bool, slot: rawptr, ok: bool) {
+unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, zero: rawptr, spec: Specification) -> (slot: rawptr, fresh: bool, ok: bool) {
 	key := key
 	key_ptr:  rawptr
 	key_cstr: cstring
@@ -1307,16 +1481,19 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 				key_ptr = &key_cstr
 			}
 		case ^runtime.Type_Info_Integer:
-			if number_text_kind(key, spec) != .Integer { return false, nil, false }
+			if number_text_kind(key, spec) != .Integer { return nil, false, false }
 			int_ok: bool
 			key_int, int_ok = parse_integer(key)
-			if !int_ok { return false, nil, false }
+			if !int_ok { return nil, false, false }
 			key_ptr = &key_int
-		case: return false, nil, false
+		case: return nil, false, false
 	}
 
-	set_ptr := runtime.__dynamic_map_set_without_hash(raw_map, t.map_info, key_ptr, value)
-	return set_ptr != nil && !reflect.is_integer(t.key), set_ptr, true
+	_, value_ptr, just_inserted, map_err := runtime.__dynamic_map_entry(raw_map, t.map_info, key_ptr, zero)
+	if map_err != nil {
+		return nil, false, true
+	}
+	return value_ptr, just_inserted, true
 }
 
 @(private)
@@ -1328,6 +1505,23 @@ unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enu
 
 	index_type := reflect.type_info_base(t.index)
 	enum_type := index_type.variant.(^reflect.Type_Info_Enum)
+
+	allow_dup := .Allow_Duplicate_Fields in flags
+	dup: []bool
+	used_buf: [64]byte
+	used: []byte
+	if allow_dup {
+		dup = scan_duplicate_keys(p, reflect.type_info_base(type_info_of(v.id)), end_token, true) or_return
+	} else if n := (t.count + 7) / 8; n <= len(used_buf) {
+		used = used_buf[:n]
+	} else {
+		used = bytes_make(n, 1, p.allocator) or_return
+	}
+	defer delete(dup, p.allocator)
+	defer if len(used) > len(used_buf) {
+		delete(used, p.allocator)
+	}
+	ordinal := 0
 
 	enumerated_array_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
@@ -1346,11 +1540,25 @@ unmarshal_enumerated_array :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Enu
 		if index < 0 || index >= t.count {
 			return Unsupported_Type_Error{id = v.id, token = start}
 		}
+		skip := ordinal < len(dup) && dup[ordinal]
+		ordinal += 1
+		if !allow_dup {
+			bit := byte(1) << uint(index & 7)
+			if used[index/8] & bit != 0 {
+				return .Multiple_Use_Field
+			}
+			used[index/8] |= bit
+		}
 
-		index_ptr := rawptr(uintptr(v.data) + uintptr(index*t.elem_size))
-		index_any := any{index_ptr, t.elem.id}
-
-		unmarshal_value(p, index_any, flags) or_return
+		if skip {
+			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
+				return syntax_error(p, skip_err, flags)
+			}
+		} else {
+			index_ptr := rawptr(uintptr(v.data) + uintptr(index*t.elem_size))
+			index_any := any{index_ptr, t.elem.id}
+			unmarshal_value(p, index_any, flags) or_return
+		}
 
 		if parse_comma(p) {
 			break enumerated_array_loop

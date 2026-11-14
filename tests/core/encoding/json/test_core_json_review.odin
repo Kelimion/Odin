@@ -11,6 +11,7 @@ import "base:runtime"
 Failing_Allocator :: struct {
 	backing: runtime.Allocator,
 	left:    int,
+	once:    bool,
 }
 
 failing_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
@@ -18,6 +19,9 @@ failing_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size,
 	#partial switch mode {
 	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
 		if f.left <= 0 {
+			if f.once {
+				f.left = max(int)
+			}
 			return nil, .Out_Of_Memory
 		}
 		f.left -= 1
@@ -1509,4 +1513,168 @@ review_unmarshal_map_value_error_keeps_value :: proc(t: ^testing.T) {
 		delete(val.a)
 	}
 	delete(m)
+}
+
+@(test)
+review_unmarshal_duplicate_keys :: proc(t: ^testing.T) {
+	ALLOW :: json.Unmarshal_Flags{.Allow_Duplicate_Fields}
+	S :: struct {
+		m: map[string]int,
+		a: []int,
+		s: string,
+	}
+	free_s :: proc(s: ^S, allocator: runtime.Allocator) {
+		for k in s.m {
+			delete(k, allocator)
+		}
+		delete(s.m)
+		delete(s.a, allocator)
+		delete(s.s, allocator)
+		s^ = {}
+	}
+	free_strings :: proc(m: ^map[string]string, allocator: runtime.Allocator) {
+		for k, v in m {
+			delete(k, allocator)
+			delete(v, allocator)
+		}
+		delete(m^)
+		m^ = nil
+	}
+	E :: enum {
+		A,
+		B,
+	}
+	Big :: enum {
+		Lo = 0,
+		Hi = 1000,
+	}
+
+	for spec in SPECS {
+		DUPS :: `{"m": {"a": 1}, "m": {"b": 2}, "a": [1, 2, 3], "a": [9], "s": "x", "s": null}`
+		s: S
+		err := json.unmarshal_string(DUPS, &s, spec)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field, "%v: %v", spec, err)
+		free_s(&s, context.allocator)
+		err = json.unmarshal_string(DUPS, &s, spec, flags = ALLOW)
+		testing.expectf(t, err == nil && len(s.m) == 1 && s.m["b"] == 2 && len(s.a) == 1 && s.a[0] == 9 && s.s == "", "%v: %v %v", spec, s, err)
+		free_s(&s, context.allocator)
+
+		m: map[string]string
+		err = json.unmarshal_string(`{"a": "x", "b": "z", "a": "y"}`, &m, spec)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field && m["a"] == "x", "%v: %v %v", spec, m, err)
+		free_strings(&m, context.allocator)
+		err = json.unmarshal_string(`{"a": "x", "b": "z", "a": "y"}`, &m, spec, flags = ALLOW)
+		testing.expectf(t, err == nil && len(m) == 2 && m["a"] == "y" && m["b"] == "z", "%v: %v %v", spec, m, err)
+		free_strings(&m, context.allocator)
+
+		for flags in ([]json.Unmarshal_Flags{{}, ALLOW}) {
+			m[strings.clone("a")] = strings.clone("old")
+			old := m["a"]
+			err = json.unmarshal_string(`{"a": "new", "c": "w"}`, &m, spec, flags = flags)
+			testing.expectf(t, err == nil && len(m) == 2 && m["a"] == "new" && m["c"] == "w", "%v %v: %v %v", spec, flags, m, err)
+			delete(old)
+			err = json.unmarshal_string(`{"d": "1", "d": "2"}`, &m, spec, flags = flags)
+			if flags == {} {
+				testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field && m["d"] == "1", "%v: %v %v", spec, m, err)
+			} else {
+				testing.expectf(t, err == nil && len(m) == 3 && m["d"] == "2", "%v: %v %v", spec, m, err)
+			}
+			free_strings(&m, context.allocator)
+		}
+
+		XY :: struct {
+			x, y: int,
+		}
+		pm: map[string]XY
+		pm["a"] = {1, 2}
+		err = json.unmarshal_string(`{"a": {"y": 5}}`, &pm, spec)
+		testing.expectf(t, err == nil && len(pm) == 1 && pm["a"] == XY{0, 5}, "%v: %v %v", spec, pm, err)
+		delete(pm)
+
+		ea: [E]string
+		err = json.unmarshal_string(`{"A": "x", "B": "z", "A": "y"}`, &ea, spec)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field && ea[.A] == "x", "%v: %v %v", spec, ea, err)
+		delete(ea[.A])
+		delete(ea[.B])
+		ea = {}
+		err = json.unmarshal_string(`{"A": "x", "B": "z", "A": "y"}`, &ea, spec, flags = ALLOW)
+		testing.expectf(t, err == nil && ea[.A] == "y" && ea[.B] == "z", "%v: %v %v", spec, ea, err)
+		delete(ea[.A])
+		delete(ea[.B])
+
+		big: #sparse[Big]u8
+		err = json.unmarshal_string(`{"Lo": 1, "Hi": 2}`, &big, spec)
+		testing.expectf(t, err == nil && big[.Lo] == 1 && big[.Hi] == 2, "%v: %v", spec, err)
+		err = json.unmarshal_string(`{"Hi": 3, "Hi": 4}`, &big, spec)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field && big[.Hi] == 3, "%v: %v", spec, err)
+		err = json.unmarshal_string(`{"Hi": 5, "Hi": 6}`, &big, spec, flags = ALLOW)
+		testing.expectf(t, err == nil && big[.Hi] == 6, "%v: %v", spec, err)
+
+		if spec != .JSON {
+			im: map[int]int
+			err = json.unmarshal_string(`{"16": 1, "0x10": 2}`, &im, spec)
+			testing.expectf(t, err == json.Unmarshal_Data_Error.Multiple_Use_Field && im[16] == 1, "%v: %v %v", spec, im, err)
+			delete(im)
+			im = nil
+			err = json.unmarshal_string(`{"16": 1, "0x10": 2, "+16": 3, "7": 4}`, &im, spec, flags = ALLOW)
+			testing.expectf(t, err == nil && len(im) == 2 && im[16] == 3 && im[7] == 4, "%v: %v %v", spec, im, err)
+			delete(im)
+		}
+	}
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	DEEP :: `{"m": {"k1": 1, "k2": 2}, "s": "first", "m": {"k3": 3}, "a": [1, 2], "s": "second", "a": [3]}`
+	for once in ([]bool{false, true}) {
+		for n in 0..<64 {
+			f := Failing_Allocator{backing = mem.tracking_allocator(&track), left = n, once = once}
+			s: S
+			err := json.unmarshal_string(DEEP, &s, allocator = failing_allocator(&f), flags = ALLOW)
+			ok := err == nil && len(s.m) == 1 && s.m["k3"] == 3 && s.s == "second" && len(s.a) == 1 && s.a[0] == 3
+			testing.expectf(t, ok || err == json.Error.Out_Of_Memory, "%v with %d allocations: %v %v", once, n, s, err)
+			free_s(&s, failing_allocator(&f))
+			testing.expectf(t, len(track.allocation_map) == 0, "%v with %d allocations: leaked %v", once, n, len(track.allocation_map))
+			mem.tracking_allocator_clear(&track)
+			if err == nil && !once {
+				break
+			}
+		}
+		for n in 0..<64 {
+			f := Failing_Allocator{backing = mem.tracking_allocator(&track), left = n, once = once}
+			m: map[string]string
+			m.allocator = failing_allocator(&f)
+			err := json.unmarshal_string(`{"a": "x", "b": "z", "a": "y", "c": "w"}`, &m, allocator = failing_allocator(&f), flags = ALLOW)
+			ok := err == nil && len(m) == 3 && m["a"] == "y" && m["b"] == "z" && m["c"] == "w"
+			testing.expectf(t, ok || err == json.Error.Out_Of_Memory, "%v with %d allocations: %v %v", once, n, m, err)
+			free_strings(&m, failing_allocator(&f))
+			testing.expectf(t, len(track.allocation_map) == 0, "%v with %d allocations: leaked %v", once, n, len(track.allocation_map))
+			mem.tracking_allocator_clear(&track)
+			if err == nil && !once {
+				break
+			}
+		}
+		for n in 0..<64 {
+			f := Failing_Allocator{backing = mem.tracking_allocator(&track), left = n, once = once}
+			m: map[int]string
+			m.allocator = failing_allocator(&f)
+			err := json.unmarshal_string(`{"1": "x", "2": "z", "1": "y", "3": "w"}`, &m, allocator = failing_allocator(&f), flags = ALLOW)
+			ok := err == nil && len(m) == 3 && m[1] == "y" && m[2] == "z" && m[3] == "w"
+			testing.expectf(t, ok || err == json.Error.Out_Of_Memory, "%v with %d allocations: %v %v", once, n, m, err)
+			for _, v in m {
+				delete(v, failing_allocator(&f))
+			}
+			delete(m)
+			testing.expectf(t, len(track.allocation_map) == 0, "%v with %d allocations: leaked %v", once, n, len(track.allocation_map))
+			mem.tracking_allocator_clear(&track)
+			if err == nil && !once {
+				break
+			}
+		}
+	}
+
+	im: map[int]int
+	err := json.unmarshal_string(`{"0x10": 1, "16": 2}`, &im, .JSON, context.temp_allocator, ALLOW)
+	_, is_type := err.(json.Unsupported_Type_Error)
+	testing.expectf(t, is_type, "%v %v", im, err)
 }
