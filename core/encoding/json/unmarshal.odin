@@ -178,15 +178,16 @@ unmarshal_any :: proc(data: []byte, v: any, spec := DEFAULT_SPECIFICATION, alloc
 
 	context.allocator = p.allocator
 
-	if p.spec == .MJSON {
-		#partial switch p.curr_token.kind {
-		case .Ident, .String:
-			return unmarshal_object(&p, data, .EOF, flags)
-		}
+	err: Unmarshal_Error
+	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
+		err = unmarshal_object(&p, data, .EOF, flags)
+	} else {
+		err = unmarshal_value(&p, data, flags)
 	}
-
-	unmarshal_value(&p, data, flags) or_return
-	if p.spec == .JSON && !at_end(&p) {
+	if err != nil {
+		return err
+	}
+	if !at_end(&p) {
 		return .Unexpected_Token
 	}
 	return nil
@@ -513,11 +514,6 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 		return unmarshal_json_value(p, v, flags)
 	}
 
-	if .Skip_Validation in flags && p.spec == .JSON && p.curr_token_err == .Invalid_Number {
-		advance_token(p)
-		return .Invalid_Number
-	}
-
 	#partial switch p.curr_token.kind {
 	case .Open_Brace:
 		return unmarshal_object(p, v, .Close_Brace, flags)
@@ -571,6 +567,11 @@ unmarshal_json_value :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err
 unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{id = id, token = p.curr_token}
 	token := p.curr_token
+	if .Skip_Validation in flags {
+		if token_err := token_error(p); token_err != nil {
+			return token_err
+		}
+	}
 
 	#partial switch token.kind {
 	case .Null:
@@ -644,11 +645,7 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 		return UNSUPPORTED_TYPE
 
 	case .String:
-		invalid := p.curr_token_err == .Invalid_String
 		advance_token(p)
-		if .Skip_Validation in flags && invalid {
-			return .Invalid_String
-		}
 		if unmarshal_string_token(p, any{v.data, ti.id}, token, ti, flags) or_return {
 			return nil
 		}

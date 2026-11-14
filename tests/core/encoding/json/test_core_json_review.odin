@@ -284,3 +284,218 @@ review_many_comments :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+SPECS :: [3]json.Specification{.JSON, .JSON5, .SJSON}
+
+expect_document :: proc(t: ^testing.T, src: string, spec: json.Specification, ok: bool, loc := #caller_location) {
+	testing.expectf(t, json.is_valid(transmute([]byte)src, spec) == ok, "%v %q: is_valid", spec, src, loc = loc)
+
+	v, err := json.parse_string(src, spec)
+	testing.expectf(t, (err == nil) == ok && (ok || v == nil), "%v %q: parse %v, %v", spec, src, v, err, loc = loc)
+	json.destroy_value(v)
+
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		value: json.Value
+		uerr := json.unmarshal_string(src, &value, spec, flags = flags)
+		testing.expectf(t, (uerr == nil) == ok, "%v %q %v: unmarshal %v", spec, src, flags, uerr, loc = loc)
+		json.destroy_value(value)
+	}
+}
+
+@(test)
+review_strict_numbers_and_strings :: proc(t: ^testing.T) {
+	for src in ([]string{`[1e]`, `[01]`, `[-01]`, `[1.]`, `[1.e5]`, `[.5]`, `[1e+]`, `["\q"]`, "[\"a\x01b\"]", `["a`, `["\uZZZZ"]`, `['a']`, `[+1]`, `[-Infinity]`, `[NaN]`}) {
+		expect_document(t, src, .JSON, false)
+	}
+	for src in ([]string{`[0e]`, `[01]`, `[-01]`, `[1e+]`, "[\"a\x01b\"]", `["a`, `['a`, `["\uZZZZ"]`, `['\ug000']`}) {
+		expect_document(t, src, .JSON5, false)
+		expect_document(t, src, .SJSON, false)
+	}
+	for src in ([]string{`['a']`, `[+1]`, `[+1.5]`, `[-Infinity]`, `[-NaN]`, `[1.]`, `[1.e5]`, `[0xFF]`, `[0xab]`, `["\u00e9"]`, `['\'']`}) {
+		expect_document(t, src, .JSON5, true)
+		expect_document(t, src, .SJSON, true)
+	}
+	for src in ([]string{`[0]`, `[-0.5e-3]`, `[1E+2]`, `["\u00E9\n"]`, `{"a\u0001":1}`}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, true)
+		}
+	}
+	for src in ([]string{"{\"a\x01\":1}", `{"\uZZZZ":1}`, `{"a":1e}`, `{"a":{"b":01}}`}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, false)
+		}
+	}
+	expect_document(t, `{"\q":1}`, .JSON, false)
+	expect_document(t, `{'a':1}`, .JSON, false)
+	expect_document(t, `{'a':1}`, .JSON5, true)
+
+	for spec in SPECS {
+		for src in ([]string{"", "[", "[1", "[1,", "[@]", `{"a":`}) {
+			v, err := json.parse_string(src, spec)
+			testing.expectf(t, err == .Unexpected_Token && v == nil, "%v %q: %v, %v", spec, src, v, err)
+		}
+		unclosed, unclosed_err := json.parse_string(`{"a":1`, spec)
+		want: json.Error = .Unexpected_Token if spec == .JSON else .Expected_String_For_Object_Key
+		testing.expectf(t, unclosed_err == want && unclosed == nil, "%v: %v, %v", spec, unclosed, unclosed_err)
+		for src in ([]string{`"abc`, `["abc`}) {
+			v, err := json.parse_string(src, spec)
+			testing.expectf(t, err == .Invalid_String && v == nil, "%v %q: %v, %v", spec, src, v, err)
+		}
+	}
+
+	testing.expect(t, !json.is_valid_string_literal(`"\uZZZZ"`, .JSON))
+	testing.expect(t, !json.is_valid_string_literal(`"\ug000"`, .JSON5))
+	testing.expect(t, json.is_valid_string_literal(`"\uAbCd"`, .JSON))
+	testing.expect(t, !json.is_valid_number("0xZZ", .JSON5))
+	testing.expect(t, !json.is_valid_number("0xfg", .JSON5))
+	testing.expect(t, json.is_valid_number("0xfF", .JSON5))
+	testing.expect(t, json.is_valid_number("1.e5", .JSON5))
+	testing.expect(t, !json.is_valid_number("1.e5", .JSON))
+	testing.expect(t, !json.is_valid_number("1.x", .JSON5))
+}
+
+@(test)
+review_trailing_content :: proc(t: ^testing.T) {
+	for src in ([]string{`[1] 2`, `1 2`, `[1]]`, `{} x`, `"a" "b"`, "[1]\x00garbage", "[1]\x00 ", "[1]\x00\x00]", `[1],`, `{}{}`}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, false)
+		}
+	}
+	for src in ([]string{"[1] \t\r\n", "1\n", "\n\t[]\r\n", "[1]\x00", "[1]\x00\x00", "[1] \n\x00", "1\x00"}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, true)
+		}
+	}
+	expect_document(t, `"a" `, .JSON, true)
+	expect_document(t, `"a" `, .JSON5, true)
+	for src in ([]string{"[1] // c\n", "[1] // c", "[1] /* c */", "[1]\n\n"}) {
+		expect_document(t, src, .JSON5, true)
+		expect_document(t, src, .SJSON, true)
+	}
+	for src in ([]string{"[1] // c", "[1] /* c */", "[/**/1]"}) {
+		expect_document(t, src, .JSON, false)
+	}
+	for src in ([]string{"null\r\n", "[1]\n", "{a: 1}\n\n"}) {
+		expect_document(t, src, .SJSON, true)
+	}
+	for src in ([]string{"1\n2", "[1]\n]", "[1]\n,", "a = 1\n}", "a = 1\n]"}) {
+		expect_document(t, src, .SJSON, false)
+	}
+	for src in ([]string{"a = 1\n", "a = 1\nb = [2]\n\n", "a = 1 // c\n", "a = 1\n\x00\x00"}) {
+		testing.expectf(t, json.is_valid(transmute([]byte)src, .SJSON), "%q: is_valid", src)
+		v, err := json.parse_string(src, .SJSON)
+		testing.expectf(t, err == nil, "%q: parse %v", src, err)
+		json.destroy_value(v)
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			obj: json.Object
+			uerr := json.unmarshal_string(src, &obj, .SJSON, flags = flags)
+			testing.expectf(t, uerr == nil && len(obj) >= 1, "%q %v: unmarshal %v, %v", src, flags, obj, uerr)
+			json.destroy_value(obj)
+		}
+	}
+}
+
+@(test)
+review_unmarshal_strict :: proc(t: ^testing.T) {
+	for src in ([]string{`[1] 2`, `[1]]`, "[1]\x00x", `[1] x`}) {
+		for spec in SPECS {
+			x: []int
+			err := json.unmarshal_string(src, &x, spec, context.temp_allocator)
+			testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Data, "%v %q: %v", spec, src, err)
+			y: []int
+			err = json.unmarshal_string(src, &y, spec, context.temp_allocator, {.Skip_Validation})
+			testing.expectf(t, err == json.Error.Unexpected_Token, "%v %q skip: %v", spec, src, err)
+		}
+	}
+
+	for src in ([]string{`[1e]`, `[01]`, `[1.]`, `[1.e5]`}) {
+		x: []f64
+		err := json.unmarshal_string(src, &x, .JSON, context.temp_allocator)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Data, "%q: %v", src, err)
+		y: []f64
+		err = json.unmarshal_string(src, &y, .JSON, context.temp_allocator, {.Skip_Validation})
+		testing.expectf(t, err == json.Error.Invalid_Number, "%q skip: %v", src, err)
+	}
+
+	Known :: struct {
+		b: int,
+	}
+	Skipped :: struct {
+		src: string,
+		err: json.Error,
+	}
+	for c in ([]Skipped{{`{"x":1e,"b":2}`, .Invalid_Number}, {`{"x":[01],"b":2}`, .Invalid_Number}, {"{\"x\":{\"a\x01\":1},\"b\":2}", .Invalid_String}, {`{"x":{"a":"\q"},"b":2}`, .Invalid_String}}) {
+		k: Known
+		err := json.unmarshal_string(c.src, &k, .JSON, context.temp_allocator)
+		testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Data, "%q: %v", c.src, err)
+		err = json.unmarshal_string(c.src, &k, .JSON, context.temp_allocator, {.Skip_Validation})
+		testing.expectf(t, err == c.err, "%q skip: %v, want %v", c.src, err, c.err)
+	}
+
+	n: int
+	testing.expect(t, json.unmarshal_string(`0x10`, &n, .JSON) != nil)
+	testing.expect(t, json.unmarshal_string(`"\q"`, &n, .JSON, flags = {.Skip_Validation}) == json.Error.Invalid_String)
+
+	Lenient :: struct {
+		s:   string,
+		i:   int,
+		f:   f64,
+		inf: f64,
+		h:   int,
+	}
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			x: Lenient
+			err := json.unmarshal_string(`{s: 'a', i: +1, f: 1.e5, inf: -Infinity, h: 0xfF}`, &x, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && x.s == "a" && x.i == 1 && x.f == 1e5 && x.inf == 0hfff0000000000000 && x.h == 255, "%v %v: %v, %v", spec, flags, x, err)
+		}
+	}
+}
+
+@(test)
+review_invalid_utf8 :: proc(t: ^testing.T) {
+	Case :: struct {
+		src, want: string,
+	}
+	for c in ([]Case{{"[\"a\xffb\"]", "a\uFFFDb"}, {"[\"\\n\xff\"]", "\n\uFFFD"}, {"[\"\xc0\xaf\"]", "\uFFFD\uFFFD"}, {"['\xff']", "\uFFFD"}}) {
+		for spec in SPECS {
+			if c.src[1] == '\'' && spec == .JSON {
+				continue
+			}
+			testing.expectf(t, !json.is_valid(transmute([]byte)c.src, spec), "%v %q: is_valid", spec, c.src)
+
+			v, err := json.parse_string(c.src, spec)
+			arr, is_array := v.(json.Array)
+			s: json.String
+			if is_array && len(arr) == 1 {
+				s, _ = arr[0].(json.String)
+			}
+			if spec == .JSON {
+				testing.expectf(t, err == .Invalid_String && v == nil, "%v %q: parse %q, %v", spec, c.src, v, err)
+			} else {
+				testing.expectf(t, err == nil && s == c.want, "%v %q: parse %q, %v", spec, c.src, v, err)
+			}
+			json.destroy_value(v)
+
+			x: []string
+			uerr := json.unmarshal_string(c.src, &x, spec, context.temp_allocator)
+			testing.expectf(t, uerr == json.Unmarshal_Data_Error.Invalid_Data, "%v %q: unmarshal %v", spec, c.src, uerr)
+			uerr = json.unmarshal_string(c.src, &x, spec, context.temp_allocator, {.Skip_Validation})
+			testing.expectf(t, uerr == json.Error.Invalid_String, "%v %q: unmarshal skip %v", spec, c.src, uerr)
+
+			value: json.Value
+			uerr = json.unmarshal_string(c.src, &value, spec, context.temp_allocator, {.Skip_Validation})
+			testing.expectf(t, uerr == json.Error.Invalid_String, "%v %q: unmarshal Value skip %v", spec, c.src, uerr)
+		}
+	}
+}
+
+@(test)
+review_unvalidated_key_with_tab :: proc(t: ^testing.T) {
+	for spec in SPECS {
+		m: map[string]int
+		p := json.make_parser(transmute([]byte)string("{\"a\tb\":5}"), spec, true, context.temp_allocator)
+		err := json.unmarshal_value(&p, m)
+		testing.expectf(t, err == nil && len(m) == 1, "%v: %v, %v", spec, m, err)
+	}
+}

@@ -3,7 +3,7 @@ Encoding and decoding JSON in strict `JSON`, [[ JSON5 ; https://json5.org/ ]] an
 
 Using one of these `Specification`s.
 	JSON
-		strict JSON
+		strict JSON; NUL bytes after the value are ignored
 	JSON5
 		pure superset of JSON and valid JavaScript
 		https://json5.org/

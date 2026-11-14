@@ -253,14 +253,11 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 			token.kind = .String
 			if t.validated {
 				if e, closed := string_token_end(data, start); closed {
-					end, err = e, .Illegal_Character
+					end = e
 					break
 				}
 			}
 			end, err = scan_string(t, start)
-			if err == nil {
-				err = .Illegal_Character
-			}
 
 		case 'A'..='Z', 'a'..='z', '_':
 			end = alphanum_end(data, start+1)
@@ -274,9 +271,6 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 				break scan
 			}
 			end, token.kind, err = scan_decimal(t, start)
-			if c == '+' && err == nil {
-				err = .Illegal_Character
-			}
 
 		case '0'..='9':
 			if c == '0' && t.spec != .JSON && start+1 < len(data) {
@@ -421,8 +415,8 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 					skip_alphanum(t)
 				}
 				switch string(t.data[token.offset:t.offset]) {
-				case "-Infinity": token.kind = .Infinity
-				case "-NaN":      token.kind = .NaN
+				case "-Infinity": token.kind, err = .Infinity, nil
+				case "-NaN":      token.kind, err = .NaN, nil
 				}
 			}
 			break block
@@ -610,7 +604,7 @@ scan_decimal :: #force_inline proc "contextless" (t: ^Tokenizer, start: int) -> 
 	}
 
 	valid := (first_digit != '0' || int_digits == 1) &&
-	         (!has_dot || frac_digits > 0 || (t.spec != .JSON && !has_exp)) &&
+	         (!has_dot || frac_digits > 0 || t.spec != .JSON) &&
 	         (!has_exp || exp_digits > 0)
 	if !valid {
 		err = .Invalid_Number
@@ -728,7 +722,7 @@ is_valid_number :: proc(str: string, spec: Specification) -> bool {
 			}
 			hexadecimal_loop: for len(s) > 0 {
 				switch s[0] {
-				case '0'..='9', 'A'..='Z', 'a'..='z':
+				case '0'..='9', 'A'..='F', 'a'..='f':
 					s = s[1:]
 				case:
 					break hexadecimal_loop
@@ -757,8 +751,8 @@ is_valid_number :: proc(str: string, spec: Specification) -> bool {
 	}
 
 	if spec != .JSON {
-		if len(s) == 1 && s[0] == '.' { // Allow trailing decimal point
-			return true
+		if len(s) >= 1 && s[0] == '.' && (len(s) == 1 || s[1] == 'e' || s[1] == 'E') { // Allow trailing decimal point
+			s = s[1:]
 		}
 	}
 
@@ -789,24 +783,31 @@ is_valid_number :: proc(str: string, spec: Specification) -> bool {
 
 @(require_results)
 is_valid_string_literal :: proc(str: string, spec: Specification) -> bool {
+	valid, valid_utf8 := check_string_literal(str, spec)
+	return valid && valid_utf8
+}
+
+@(private, require_results)
+check_string_literal :: proc(str: string, spec: Specification) -> (valid, valid_utf8: bool) {
+	valid_utf8 = true
 	s := str
 	if len(s) < 2 {
-		return false
+		return
 	}
 	quote := s[0]
 	if s[0] != s[len(s)-1] {
-		return false
+		return
 	}
 	switch quote {
 	case '"':
 		// okay
 	case '\'':
 		if spec == .JSON {
-			return false
+			return
 		}
 		// okay
 	case:
-		return false
+		return
 	}
 	s = s[1 : len(s)-1]
 
@@ -817,35 +818,35 @@ is_valid_string_literal :: proc(str: string, spec: Specification) -> bool {
 		case c == '\\':
 			i += 1
 			if i >= len(s) {
-				return false
+				return
 			}
 			switch s[i] {
 			case '"', '\\', '/', 'b', 'n', 'r', 't', 'f':
 				i += 1
 			case '\'':
 				if spec == .JSON {
-					return false
+					return
 				}
 				i += 1
 			case '\r':
 				if spec != .JSON && i+1 < len(s) && s[i+1] == '\n' {
 					i += 2
 				} else {
-					return false
+					return
 				}
 			case '\n':
 				if spec != .JSON {
 					i += 1
 				} else {
-					return false
+					return
 				}
 			case 'u':
 				if i >= len(s) {
-					return false
+					return
 				}
 				hex := s[i+1:]
 				if len(hex) < 4 {
-					return false
+					return
 				}
 				hex = hex[:4]
 				i += 5
@@ -856,15 +857,15 @@ is_valid_string_literal :: proc(str: string, spec: Specification) -> bool {
 					case '0'..='9', 'a'..='f', 'A'..='F':
 						// Okay
 					case:
-						return false
+						return
 					}
 				}
 
-			case: return false
+			case: return
 			}
 
 		case c == quote, c < ' ':
-			return false
+			return
 
 		case c < utf8.RUNE_SELF:
 			i = plain_run_end(s, i, quote)
@@ -872,15 +873,15 @@ is_valid_string_literal :: proc(str: string, spec: Specification) -> bool {
 		case:
 			r, width := utf8.decode_rune_in_string(s[i:])
 			if r == utf8.RUNE_ERROR && width == 1 {
-				return false
+				valid_utf8 = false
 			}
 			i += width
 		}
 	}
 	if i == len(s) {
-		return true
+		return true, valid_utf8
 	}
-	return true
+	return true, valid_utf8
 }
 
 @(private)

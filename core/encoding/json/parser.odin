@@ -52,28 +52,45 @@ parse_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers
 	context.allocator = allocator
 	p := make_parser_from_string(data, spec, parse_integers, allocator)
 
-	switch p.spec {
-	case .JSON:
-		value, err := parse_value(&p, loc)
-		if err == nil && !at_end(&p) {
-			destroy_value(value, allocator, loc)
-			return nil, .Unexpected_Token
+	value: Value
+	err:   Error
+	if p.spec == .SJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
+		obj: Object
+		obj, err = parse_object_body(&p, .EOF, loc)
+		if err == nil {
+			value = obj
 		}
-		return value, err
-	case .JSON5:
-		return parse_value(&p, loc)
-	case .SJSON:
-		#partial switch p.curr_token.kind {
-		case .Ident, .String:
-			obj, err := parse_object_body(&p, .EOF, loc)
-			if err != nil {
-				return nil, err
-			}
-			return obj, nil
-		}
-		return parse_value(&p, loc)
+	} else {
+		value, err = parse_value(&p, loc)
 	}
-	return parse_object(&p, loc)
+	if err != nil {
+		return nil, err
+	}
+	if !at_end(&p) {
+		destroy_value(value, allocator, loc)
+		return nil, .Unexpected_Token
+	}
+	return value, nil
+}
+
+@(private, require_results)
+token_error :: proc(p: ^Parser) -> Error {
+	#partial switch p.curr_token.kind {
+	case .Invalid, .EOF:
+		return nil
+	}
+	return p.curr_token_err
+}
+
+@(private, require_results)
+parse_token_error :: proc(p: ^Parser) -> Error {
+	err := token_error(p)
+	if err == .Invalid_String && p.spec != .JSON {
+		if valid, _ := check_string_literal(p.curr_token.text, p.spec); valid {
+			return nil
+		}
+	}
+	return err
 }
 
 @(require_results)
@@ -145,9 +162,12 @@ expect_closing_token :: proc(p: ^Parser, kind: Token_Kind) -> Error {
 	return expect_token(p, kind)
 }
 
-// Whether the current token is `.EOF` with nothing but NULs after it.
+// Whether the document ends here: after SJSON's inserted comma, the current token is `.EOF` with nothing but NULs after it.
 @(private, require_results)
 at_end :: proc(p: ^Parser) -> bool {
+	if p.spec == .MJSON && p.curr_token.kind == .Comma && p.curr_token.offset < len(p.tok.data) && p.tok.data[p.curr_token.offset] == '\n' {
+		advance_token(p)
+	}
 	if p.curr_token.kind != .EOF {
 		return false
 	}
@@ -161,16 +181,8 @@ at_end :: proc(p: ^Parser) -> bool {
 
 @(require_results)
 parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: Error) {
-	err = .None
+	parse_token_error(p) or_return
 	token := p.curr_token
-	if p.spec == .JSON {
-		#partial switch p.curr_token_err {
-		case .Invalid_Number, .Invalid_String:
-			err = p.curr_token_err
-			advance_token(p)
-			return
-		}
-	}
 	#partial switch token.kind {
 	case .Null:
 		advance_token(p)
@@ -240,23 +252,12 @@ parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 
 @(private, require_results)
 skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
+	if check_tokens {
+		token_error(p) or_return
+	}
 	#partial switch p.curr_token.kind {
-	case .Null, .False, .True:
+	case .Null, .False, .True, .Integer, .Float, .String:
 		advance_token(p)
-		return nil
-	case .Integer, .Float:
-		invalid := p.spec == .JSON && p.curr_token_err == .Invalid_Number
-		advance_token(p)
-		if check_tokens && invalid {
-			return .Invalid_Number
-		}
-		return nil
-	case .String:
-		invalid := p.curr_token_err == .Invalid_String
-		advance_token(p)
-		if check_tokens && invalid {
-			return .Invalid_String
-		}
 		return nil
 	case .Ident:
 		if p.spec == .MJSON {
@@ -271,8 +272,8 @@ skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
 			return .Max_Depth_Exceeded
 		}
 		for p.curr_token.kind != .Close_Brace {
-			if check_tokens && p.curr_token_err == .Invalid_String {
-				return .Invalid_String
+			if check_tokens {
+				token_error(p) or_return
 			}
 			if !(p.spec != .JSON && allow_token(p, .Ident)) && expect_token(p, .String) != nil {
 				return .Expected_String_For_Object_Key
@@ -380,13 +381,8 @@ parse_object_key :: proc(p: ^Parser, key_allocator: mem.Allocator, loc := #calle
 			return clone_string(tok.text, key_allocator, loc)
 		}
 	}
-	invalid := p.spec == .JSON && p.curr_token_err == .Invalid_String
 	if tok_err := expect_token(p, .String); tok_err != nil {
 		err = .Expected_String_For_Object_Key
-		return
-	}
-	if invalid {
-		err = .Invalid_String
 		return
 	}
 	return unquote_token(tok, p.spec, p.tok.validated, key_allocator, loc)
@@ -427,6 +423,7 @@ parse_object_body :: proc(p: ^Parser, end_token: Token_Kind, loc := #caller_loca
 	}
 
 	for p.curr_token.kind != end_token {
+		parse_token_error(p) or_return
 		key := parse_object_key(p, p.allocator, loc) or_return
 
 		// `key` is allocated here and does not belong to `obj` until the insert below, so every
