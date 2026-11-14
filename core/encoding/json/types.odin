@@ -8,7 +8,8 @@ Using one of these `Specification`s.
 		pure superset of JSON and valid JavaScript
 		https://json5.org/
 
-		* Object keys may be an ECMAScript 5.1 IdentifierName.
+		* Object keys may be an ECMAScript 5.1 IdentifierName of ASCII letters, digits, `_` and `$`;
+		  Unicode letters and `\u` escapes are not supported.
 		* Objects may have a single trailing comma.
 		* Arrays may have a single trailing comma.
 		* Strings may be single quoted.

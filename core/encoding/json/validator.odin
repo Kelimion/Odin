@@ -23,7 +23,7 @@ validate_document :: proc(p: ^Parser) -> bool {
 @(require_results)
 validate_object_key :: proc(p: ^Parser) -> bool {
 	if p.spec != .JSON {
-		if allow_token(p, .Ident) {
+		if allow_name_token(p) {
 			return true
 		}
 	}

@@ -1212,7 +1212,7 @@ count_object_entries :: proc(p: ^Parser, end_token: Token_Kind) -> (count: uintp
 	defer p^ = p_backup
 
 	for p.curr_token.kind != end_token {
-		if !(p.spec != .JSON && allow_token(p, .Ident)) && expect_token(p, .String) != nil {
+		if !(p.spec != .JSON && allow_name_token(p)) && expect_token(p, .String) != nil {
 			break
 		}
 		if parse_colon(p) != nil || skip_value(p) != nil {
@@ -1248,6 +1248,11 @@ unmarshal_count_array :: proc(p: ^Parser, flags: Unmarshal_Flags) -> (length: ui
 		if parse_comma(p) {
 			break
 		}
+	}
+	if .Skip_Validation in flags && p.curr_token.kind != .Close_Bracket {
+		err = .EOF if p.curr_token.kind == .EOF else .Unexpected_Token
+		p^ = p_backup
+		return 0, err
 	}
 	p^ = p_backup
 	return

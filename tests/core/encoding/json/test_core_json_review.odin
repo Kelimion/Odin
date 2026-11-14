@@ -336,7 +336,7 @@ review_strict_numbers_and_strings :: proc(t: ^testing.T) {
 			testing.expectf(t, err == .Unexpected_Token && v == nil, "%v %q: %v, %v", spec, src, v, err)
 		}
 		unclosed, unclosed_err := json.parse_string(`{"a":1`, spec)
-		want: json.Error = .Unexpected_Token if spec == .JSON else .Expected_String_For_Object_Key
+		want: json.Error = .Expected_String_For_Object_Key if spec == .SJSON else .Unexpected_Token
 		testing.expectf(t, unclosed_err == want && unclosed == nil, "%v: %v, %v", spec, unclosed, unclosed_err)
 		for src in ([]string{`"abc`, `["abc`}) {
 			v, err := json.parse_string(src, spec)
@@ -707,5 +707,89 @@ review_json5_strings :: proc(t: ^testing.T) {
 			err = json.unmarshal_string("{\"a\\qb\": 1, \"c\\\nd\": 2}", &f, spec, context.temp_allocator, flags)
 			testing.expectf(t, err == nil && f.aqb == 1 && f.cd == 2, "%v %v: %v, %v", spec, flags, f, err)
 		}
+	}
+}
+
+@(test)
+review_json5_keys_and_commas :: proc(t: ^testing.T) {
+	for src in ([]string{`{$a:1}`, `{a$:1}`, `{$:1}`, `{_$1:1}`, `{null:1}`, `{true:1}`, `{false:1}`, `{Infinity:1}`, `{NaN:1}`, `{if:1}`, `{a:1,null:2}`, `{a:{$b:[1,2,]},}`, "{\xc2\xa0$a:1}"}) {
+		expect_document(t, src, .JSON5, true)
+		expect_document(t, src, .SJSON, true)
+		expect_document(t, src, .JSON, false)
+	}
+	for src in ([]string{`{-Infinity:1}`, `{+NaN:1}`, `{-NaN:1}`, `{1:1}`, `{a b:1}`, `[1,,2]`, `[,1]`, `{,}`, `[$]`}) {
+		expect_document(t, src, .JSON, false)
+		expect_document(t, src, .JSON5, false)
+	}
+	for src in ([]string{`[1 2]`, `{a:1 b:2}`, `[[] []]`, `{"a":1 "b":2}`, `[1 /**/ 2]`}) {
+		expect_document(t, src, .JSON5, false)
+		expect_document(t, src, .SJSON, true)
+	}
+	expect_document(t, "[1\n2]", .JSON5, false)
+	expect_document(t, "[1\n2]", .SJSON, true)
+	expect_document(t, `["$"]`, .JSON, true)
+	expect_document(t, `{"a":1}`, .JSON, true)
+
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		v, err := json.parse_string(`{null: 1, $a: 2, true: 3, NaN: 4}`, spec)
+		obj, _ := v.(json.Object)
+		null_value, _ := obj["null"].(json.Float)
+		testing.expectf(t, err == nil && len(obj) == 4 && null_value == 1 && "$a" in obj && "true" in obj && "NaN" in obj, "%v: %v, %v", spec, v, err)
+		json.destroy_value(v)
+
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			m: map[string]int
+			uerr := json.unmarshal_string(`{null: 1, $a: 2, true: 3, a$b: 4}`, &m, spec, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil && len(m) == 4 && m["null"] == 1 && m["$a"] == 2 && m["true"] == 3 && m["a$b"] == 4, "%v %v: %v, %v", spec, flags, m, uerr)
+
+			Tagged :: struct {
+				t: int `json:"true"`,
+				d: int `json:"$d"`,
+			}
+			x: Tagged
+			uerr = json.unmarshal_string(`{true: 1, $d: 2}`, &x, spec, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil && x.t == 1 && x.d == 2, "%v %v: %v, %v", spec, flags, x, uerr)
+
+			y: Tagged
+			uerr = json.unmarshal_string(`{other: {null: 1, $q: [1, 2]}, true: 5}`, &y, spec, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil && y.t == 5, "%v %v: %v, %v", spec, flags, y, uerr)
+		}
+	}
+
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		words: []string
+		err := json.unmarshal_string(`[$a, b$c, $]`, &words, .SJSON, context.temp_allocator, flags)
+		testing.expectf(t, err == nil && len(words) == 3 && words[0] == "$a" && words[1] == "b$c" && words[2] == "$", "%v: %v, %v", flags, words, err)
+
+		x: []int
+		err = json.unmarshal_string(`[1 2]`, &x, .JSON5, context.temp_allocator, flags)
+		testing.expectf(t, err != nil, "%v: %v, %v", flags, x, err)
+		y: []int
+		err = json.unmarshal_string(`[1 2]`, &y, .SJSON, context.temp_allocator, flags)
+		testing.expectf(t, err == nil && len(y) == 2 && y[0] == 1 && y[1] == 2, "%v: %v, %v", flags, y, err)
+	}
+
+	Tok :: struct {
+		src:  string,
+		spec: json.Specification,
+		kind: json.Token_Kind,
+		text: string,
+		err:  json.Error,
+	}
+	for c in ([]Tok{{"$a", .JSON5, .Ident, "$a", nil}, {"a$b", .SJSON, .Ident, "a$b", nil}, {"$", .JSON, .Invalid, "$", .Illegal_Character}, {"true$", .JSON, .True, "true", nil}, {"a$", .JSON, .Ident, "a", nil}}) {
+		tz := json.make_tokenizer(c.src, c.spec)
+		tok, err := json.get_token(&tz)
+		testing.expectf(t, tok.kind == c.kind && tok.text == c.text && err == c.err, "%v %q: %v %q %v", c.spec, c.src, tok.kind, tok.text, err)
+	}
+
+	Named :: struct {
+		x: int,
+	}
+	for spec in SPECS {
+		n: Named
+		err := json.unmarshal_string(`{"x": [1, 2`, &n, spec, flags = {.Skip_Validation})
+		testing.expectf(t, err == json.Error.EOF, "%v: %v", spec, err)
+		err = json.unmarshal_string(`{"x": [1, 2}`, &n, spec, flags = {.Skip_Validation})
+		testing.expectf(t, err == json.Error.Unexpected_Token, "%v: %v", spec, err)
 	}
 }

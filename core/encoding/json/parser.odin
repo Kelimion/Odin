@@ -115,6 +115,18 @@ allow_token :: proc(p: ^Parser, kind: Token_Kind) -> bool {
 	return false
 }
 
+@(private, require_results)
+allow_name_token :: proc(p: ^Parser) -> bool {
+	#partial switch p.curr_token.kind {
+	case .Ident, .Null, .False, .True, .Infinity, .NaN:
+		if p.curr_token.text[0] != '-' && p.curr_token.text[0] != '+' {
+			advance_token(p)
+			return true
+		}
+	}
+	return false
+}
+
 @(require_results)
 expect_token :: proc(p: ^Parser, kind: Token_Kind) -> Error {
 	prev := p.curr_token
@@ -138,12 +150,12 @@ parse_colon :: proc(p: ^Parser) -> (err: Error) {
 @(require_results)
 parse_comma :: proc(p: ^Parser) -> (do_break: bool) {
 	switch p.spec {
-	case .JSON5, .MJSON:
+	case .MJSON:
 		if allow_token(p, .Comma) {
 			return false
 		}
 		return false
-	case .JSON:
+	case .JSON, .JSON5:
 		if !allow_token(p, .Comma) {
 			return true
 		}
@@ -274,7 +286,7 @@ skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
 			if check_tokens {
 				token_error(p) or_return
 			}
-			if !(p.spec != .JSON && allow_token(p, .Ident)) && expect_token(p, .String) != nil {
+			if !(p.spec != .JSON && allow_name_token(p)) && expect_token(p, .String) != nil {
 				return .Expected_String_For_Object_Key
 			}
 			parse_colon(p)               or_return
@@ -376,7 +388,7 @@ clone_string :: proc(s: string, allocator: mem.Allocator, loc := #caller_locatio
 parse_object_key :: proc(p: ^Parser, key_allocator: mem.Allocator, loc := #caller_location) -> (key: string, err: Error) {
 	tok := p.curr_token
 	if p.spec != .JSON {
-		if allow_token(p, .Ident) {
+		if allow_name_token(p) {
 			return clone_string(tok.text, key_allocator, loc)
 		}
 	}
@@ -390,7 +402,7 @@ parse_object_key :: proc(p: ^Parser, key_allocator: mem.Allocator, loc := #calle
 @(private, require_results)
 parse_object_key_view :: proc(p: ^Parser, buf: []byte) -> (key: string, allocated: bool, err: Error) {
 	tok := p.curr_token
-	if p.spec != .JSON && allow_token(p, .Ident) {
+	if p.spec != .JSON && allow_name_token(p) {
 		return tok.text, false, nil
 	}
 	if expect_token(p, .String) != nil {

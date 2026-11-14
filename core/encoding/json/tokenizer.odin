@@ -317,8 +317,13 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 			}
 			end, err = scan_string(t, start)
 
+		case '$':
+			if t.spec == .JSON {
+				break scan
+			}
+			fallthrough
 		case 'A'..='Z', 'a'..='z', '_':
-			end = alphanum_end(data, start+1)
+			end = alphanum_end(data, start+1, t.spec)
 			token.kind = ident_kind(data[start:end], t.spec)
 
 		case '-', '+':
@@ -431,7 +436,7 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 	}
 
 	skip_alphanum :: proc(t: ^Tokenizer) {
-		if i := alphanum_end(t.data, t.offset); i != t.offset {
+		if i := alphanum_end(t.data, t.offset, t.spec); i != t.offset {
 			move_to(t, i)
 		}
 	}
@@ -458,6 +463,12 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 		token.kind = .Comma
 		return
 
+	case '$':
+		if t.spec == .JSON {
+			err = .Illegal_Character
+			break
+		}
+		fallthrough
 	case 'A'..='Z', 'a'..='z', '_':
 		skip_alphanum(t)
 		token.kind = ident_kind(t.data[token.offset:t.offset], t.spec)
@@ -613,11 +624,16 @@ update_insert_comma :: proc "contextless" (t: ^Tokenizer, kind: Token_Kind) {
 }
 
 @(private="file")
-alphanum_end :: proc "contextless" (s: string, i: int) -> int #no_bounds_check {
+alphanum_end :: proc "contextless" (s: string, i: int, spec: Specification) -> int #no_bounds_check {
 	i := i
 	for i < len(s) {
 		switch s[i] {
 		case 'A'..='Z', 'a'..='z', '0'..='9', '_':
+			i += 1
+		case '$':
+			if spec == .JSON {
+				return i
+			}
 			i += 1
 		case:
 			return i
@@ -1044,14 +1060,14 @@ count_validated_array :: proc(s: string, open: int, spec: Specification) -> (cou
 			depth -= 1
 			i += 1
 
-		case 'A'..='Z', 'a'..='z', '_':
+		case 'A'..='Z', 'a'..='z', '_', '$':
 			count += uintptr(depth == 0)
-			i = alphanum_end(s, i+1)
+			i = alphanum_end(s, i+1, spec)
 
 		case '-', '+':
 			count += uintptr(depth == 0)
 			if i+1 < len(s) && (s[i+1] == 'I' || s[i+1] == 'N') {
-				i = alphanum_end(s, i+1)
+				i = alphanum_end(s, i+1, spec)
 			} else {
 				i = number_end(s, i+1, spec)
 			}
