@@ -96,6 +96,13 @@ parse_token_error :: proc(p: ^Parser) -> Error {
 token_end_pos :: proc(tok: Token) -> Pos {
 	end := tok.pos
 	end.offset += len(tok.text)
+	end.column += len(tok.text)
+	for c, i in transmute([]byte)tok.text {
+		if c == '\n' {
+			end.line += 1
+			end.column = len(tok.text) - i
+		}
+	}
 	return end
 }
 
@@ -246,9 +253,9 @@ parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 				value = transmute(f64)inf
 				return
 			case allow_token(p, .NaN):
-				nan: u64 = 0x7ff7ffffffffffff
+				nan: u64 = 0x7ff8000000000001
 				if token.text[0] == '-' {
-					nan = 0xfff7ffffffffffff
+					nan = 0xfff8000000000001
 				}
 				value = transmute(f64)nan
 				return

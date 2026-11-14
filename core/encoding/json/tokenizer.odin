@@ -58,7 +58,7 @@ Tokenizer :: struct {
 
 @(require_results)
 make_tokenizer :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers := false) -> Tokenizer {
-	t := Tokenizer{pos = {line=1}, data = data, spec = spec, parse_integers = parse_integers}
+	t := Tokenizer{pos = {line=1, column=1}, data = data, spec = spec, parse_integers = parse_integers}
 	next_rune(&t)
 	if t.r == utf8.RUNE_BOM {
 		next_rune(&t)
@@ -78,7 +78,7 @@ next_rune :: proc(t: ^Tokenizer) -> rune #no_bounds_check {
 @(private="file")
 move_to :: #force_inline proc "contextless" (t: ^Tokenizer, offset: int) #no_bounds_check {
 	t.offset     = offset
-	t.pos.column = offset - t.curr_line_offset
+	t.pos.column = offset - t.curr_line_offset + 1
 
 	switch {
 	case offset >= len(t.data):
@@ -166,28 +166,44 @@ string_stop :: proc "contextless" (s: string, i: int, quote: byte) -> int #no_bo
 	return i
 }
 
-
-// Where the string token at `s[start]` ends, as `scan_string` finds it: after its closing quote, or
-// at a newline or the end of `s` that leaves it unterminated. No other byte matters: an escape hides
-// at most the quote, backslash or line break after it, and no UTF-8 sequence holds a quote or a newline.
+// Where the string token at `s[start]` ends, as `scan_string` finds it: after its closing quote,
+// or at a newline or the end of `s` that leaves it unterminated. `lines` counts the escaped LFs
+// inside it and `line_start` is the offset after the last one. No other byte matters:
+// an escape hides at most the quote, backslash or line break after it,
+// and no UTF-8 sequence holds a quote or a newline.
 @(private="file")
-string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, closed: bool) #no_bounds_check {
+string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, closed: bool, lines: int, line_start: int) #no_bounds_check {
 	quote := s[start]
 	i := start + 1
 	for i < len(s) {
 		i = string_stop(s, i, quote)
 		if i >= len(s) || s[i] == '\n' {
-			return i, false
+			return i, false, lines, line_start
 		}
 		if s[i] == quote {
-			return i + 1, true
+			return i + 1, true, lines, line_start
 		}
 		if i+2 < len(s) && s[i+1] == '\r' && s[i+2] == '\n' {
 			i += 1
 		}
 		i += 2
+		if i <= len(s) && s[i-1] == '\n' {
+			lines += 1
+			line_start = i
+		}
 	}
-	return len(s), false
+	return len(s), false, lines, line_start
+}
+
+@(private="file")
+count_lines :: proc "contextless" (t: ^Tokenizer, start, end: int) #no_bounds_check {
+	for i in start..<end {
+		if t.data[i] == '\n' {
+			t.line += 1
+			t.curr_line_offset = i + 1
+		}
+	}
+	t.pos.column = t.offset - t.curr_line_offset + 1
 }
 
 @(private="file")
@@ -260,6 +276,7 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 	data  := t.data
 	start := t.offset
 	end   := 0
+	lines, line_start := 0, 0
 
 	scan: for start < len(data) {
 		c := data[start]
@@ -278,7 +295,7 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 				break scan
 			}
 			t.line += 1
-			t.curr_line_offset = start
+			t.curr_line_offset = start + 1
 			start += 1
 			continue
 
@@ -295,27 +312,27 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 		case '"':
 			token.kind = .String
 			if t.validated {
-				if e, closed := string_token_end(data, start); closed {
-					end = e
+				if e, closed, l, ls := string_token_end(data, start); closed {
+					end, lines, line_start = e, l, ls
 					break
 				}
 			} else if e := plain_run_end(data, start+1, '"'); e < len(data) && data[e] == '"' {
 				end = e + 1
 				break
 			}
-			end, err = scan_string(t, start)
+			end, err, lines, line_start = scan_string(t, start)
 		case '\'':
 			if t.spec == .JSON {
 				break scan
 			}
 			token.kind = .String
 			if t.validated {
-				if e, closed := string_token_end(data, start); closed {
-					end = e
+				if e, closed, l, ls := string_token_end(data, start); closed {
+					end, lines, line_start = e, l, ls
 					break
 				}
 			}
-			end, err = scan_string(t, start)
+			end, err, lines, line_start = scan_string(t, start)
 
 		case '$':
 			if t.spec == .JSON {
@@ -350,8 +367,12 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 			break scan
 		}
 
-		token.pos  = {start, t.line, start - t.curr_line_offset}
+		token.pos  = {start, t.line, start - t.curr_line_offset + 1}
 		token.text = data[start:end]
+		if lines > 0 {
+			t.line += lines
+			t.curr_line_offset = line_start
+		}
 		move_to(t, end)
 		if t.spec == .MJSON {
 			update_insert_comma(t, token.kind)
@@ -416,7 +437,7 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 					break loop
 				}
 				t.line += 1
-				t.curr_line_offset = i
+				t.curr_line_offset = i + 1
 				i += 1
 			case 0xc2, 0xe1, 0xe2, 0xe3, 0xef:
 				if t.spec != .JSON {
@@ -459,6 +480,7 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 
 	case '\n':
 		t.insert_comma = false
+		count_lines(t, token.offset, t.offset)
 		token.text = ","
 		token.kind = .Comma
 		return
@@ -547,9 +569,13 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 		fallthrough
 	case '"':
 		token.kind = .String
-		end, string_err := scan_string(t, token.offset)
+		end, string_err, lines, line_start := scan_string(t, token.offset)
 		if string_err != nil {
 			err = string_err
+		}
+		if lines > 0 {
+			t.line += lines
+			t.curr_line_offset = line_start
 		}
 		move_to(t, end)
 
@@ -586,11 +612,13 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 						r = next_rune(t)
 						if r == '/' {
 							next_rune(t)
+							count_lines(t, token.offset, t.offset)
 							comment = true
 							return
 						}
 					}
 				}
+				count_lines(t, token.offset, t.offset)
 				err = .EOF
 			}
 		}
@@ -702,7 +730,7 @@ scan_decimal :: #force_inline proc "contextless" (t: ^Tokenizer, start: int) -> 
 
 // Scans the string literal whose opening quote is at `t.data[start]`.
 @(private="file")
-scan_string :: proc(t: ^Tokenizer, start: int) -> (end: int, err: Error) #no_bounds_check {
+scan_string :: proc(t: ^Tokenizer, start: int) -> (end: int, err: Error, lines: int, line_start: int) #no_bounds_check {
 	data  := t.data
 	quote := data[start]
 
@@ -728,6 +756,10 @@ scan_string :: proc(t: ^Tokenizer, start: int) -> (end: int, err: Error) #no_bou
 			move_to(t, i+1)
 			_ = scan_escape(t)
 			i = t.offset
+			if data[i-1] == '\n' {
+				lines += 1
+				line_start = i
+			}
 		case c < ' ':
 			if t.spec == .JSON || c == '\r' {
 				invalid = true
@@ -751,7 +783,7 @@ scan_string :: proc(t: ^Tokenizer, start: int) -> (end: int, err: Error) #no_bou
 	} else if invalid {
 		err = .Invalid_String
 	}
-	return i, err
+	return i, err, lines, line_start
 }
 
 @(private="file", require_results)
@@ -1046,7 +1078,7 @@ count_validated_array :: proc(s: string, open: int, spec: Specification) -> (cou
 		switch c {
 		case '"', '\'':
 			count += uintptr(depth == 0)
-			i, _ = string_token_end(s, i)
+			i, _, _, _ = string_token_end(s, i)
 
 		case '[', '{':
 			count += uintptr(depth == 0)

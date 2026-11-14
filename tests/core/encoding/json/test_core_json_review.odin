@@ -1,6 +1,7 @@
 package test_core_json
 
 import "core:encoding/json"
+import "core:math"
 import "core:mem"
 import "core:strings"
 import "core:testing"
@@ -792,4 +793,186 @@ review_json5_keys_and_commas :: proc(t: ^testing.T) {
 		err = json.unmarshal_string(`{"x": [1, 2}`, &n, spec, flags = {.Skip_Validation})
 		testing.expectf(t, err == json.Error.Unexpected_Token, "%v: %v", spec, err)
 	}
+}
+
+@(private="file")
+pos_at :: proc(src: string, offset: int) -> json.Pos {
+	pos := json.Pos{offset = offset, line = 1, column = offset + 1}
+	for i in 0..<offset {
+		if src[i] == '\n' {
+			pos.line += 1
+			pos.column = offset - i
+		}
+	}
+	return pos
+}
+
+@(test)
+review_positions :: proc(t: ^testing.T) {
+	SOURCES :: [?]string{
+		"/* x\n y */ 1\n2",
+		"[1,\r\n 2]",
+		"[\"a\\\nb\", 1]",
+		"[\"a\\\r\nb\", 1]",
+		"['a\\\nb', 'c\\\n\\\nd', 1]",
+		"\xc2\xa0\"a\\\nb\" 1",
+		"\xc2\xa0'a\\\r\nb' 1",
+		"a = 1\nb = 2\n\nc = [\n3\n]",
+		"// c\n1",
+		"/*\r\n\r\n*/2",
+		"[1, /* x\n y",
+		"{\n  \"k\": [\n    1,\n    2.5e3\n  ],\n  \"s\": \"x\\ny\"\n}",
+		"\xef\xbb\xbf[1,\n2]",
+		"[1,\n @]",
+		"[\"a\\\nb",
+		"\"a\nb\" 1",
+		"[\n\"\x5cu0041\", \"\\x41\\\n\", 3]",
+		"[0x1f,\n.5, +Infinity,\n-NaN]",
+		"[1,\xc2\xa0\n 2,\xe2\x80\xa8\n\n3]",
+		"",
+	}
+	for src in SOURCES {
+		for spec in SPECS {
+			for validated in ([]bool{false, true}) {
+				if validated && !json.is_valid(transmute([]byte)src, spec) {
+					continue
+				}
+				tz := json.make_tokenizer(src, spec)
+				tz.validated = validated
+				for _ in 0..<64 {
+					tok, err := json.get_token(&tz)
+					testing.expectf(t, tok.pos == pos_at(src, tok.pos.offset), "%v %v %q: %q at %v", spec, validated, src, tok.text, tok.pos)
+					testing.expectf(t, tz.pos == pos_at(src, tz.pos.offset), "%v %v %q: after %q at %v", spec, validated, src, tok.text, tz.pos)
+					inserted := tok.kind == .Comma && tok.pos.offset < len(src) && src[tok.pos.offset] == '\n'
+					if !inserted {
+						testing.expectf(t, json.token_end_pos(tok) == tz.pos, "%v %v %q: %q ends at %v, tokenizer at %v", spec, validated, src, tok.text, json.token_end_pos(tok), tz.pos)
+					}
+					if err != nil || tok.kind == .EOF {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	Pin :: struct {
+		src:  string,
+		spec: json.Specification,
+		text: string,
+		pos:  json.Pos,
+	}
+	for c in ([]Pin{
+		{"/* x\n y */ 1\n2", .JSON5, "1", {11, 2, 7}},
+		{"/* x\n y */ 1\n2", .JSON5, "2", {13, 3, 1}},
+		{"[1]", .JSON, "]", {2, 1, 3}},
+		{"a = 1\nb = 2", .SJSON, "b", {6, 2, 1}},
+		{"[\"a\\\nb\", 1]", .JSON5, "1", {9, 2, 5}},
+	}) {
+		tz := json.make_tokenizer(c.src, c.spec)
+		found := false
+		for _ in 0..<16 {
+			tok, err := json.get_token(&tz)
+			if tok.text == c.text {
+				found = true
+				testing.expectf(t, tok.pos == c.pos, "%v %q: %q at %v", c.spec, c.src, c.text, tok.pos)
+				break
+			}
+			if err != nil {
+				break
+			}
+		}
+		testing.expectf(t, found, "%v %q: no %q", c.spec, c.src, c.text)
+	}
+
+	tz := json.make_tokenizer("\"a\\\nbc\"", .JSON5)
+	tok, _ := json.get_token(&tz)
+	testing.expectf(t, json.token_end_pos(tok) == json.Pos{7, 2, 4}, "%v", json.token_end_pos(tok))
+	tz = json.make_tokenizer("true", .JSON)
+	tok, _ = json.get_token(&tz)
+	testing.expectf(t, json.token_end_pos(tok) == json.Pos{4, 1, 5}, "%v", json.token_end_pos(tok))
+}
+
+@(test)
+review_quiet_nan :: proc(t: ^testing.T) {
+	qnan := transmute(u64)math.nan_f64()
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		v, err := json.parse_string("[NaN, -NaN]", spec)
+		defer json.destroy_value(v)
+		a, ok := v.(json.Array)
+		testing.expectf(t, err == nil && ok && len(a) == 2, "%v: %v %v", spec, v, err)
+		if ok && len(a) == 2 {
+			x, _ := a[0].(json.Float)
+			y, _ := a[1].(json.Float)
+			testing.expectf(t, transmute(u64)x == qnan && transmute(u64)y == qnan | 1 << 63, "%v: %x %x", spec, transmute(u64)x, transmute(u64)y)
+		}
+
+		fs: [2]f64
+		uerr := json.unmarshal_string("[NaN, -NaN]", &fs, spec)
+		testing.expectf(t, uerr == nil && transmute(u64)fs[0] == qnan && transmute(u64)fs[1] == qnan | 1 << 63, "%v: %x %v", spec, transmute([2]u64)fs, uerr)
+	}
+}
+
+@(test)
+review_marshal_non_finite_round_trip :: proc(t: ^testing.T) {
+	Floats :: struct {
+		nan:     f64,
+		neg_nan: f64,
+		inf:     f64,
+		neg_inf: f64,
+		nan32:   f32,
+		inf16:   f16,
+		arr:     [2]f64,
+		m:       map[string]f64,
+	}
+	src := Floats{
+		nan     = math.nan_f64(),
+		neg_nan = -math.nan_f64(),
+		inf     = math.inf_f64(1),
+		neg_inf = math.inf_f64(-1),
+		nan32   = math.nan_f32(),
+		inf16   = math.inf_f16(-1),
+		arr     = {math.inf_f64(1), math.nan_f64()},
+	}
+	src.m = make(map[string]f64, context.temp_allocator)
+	src.m["x"] = math.inf_f64(-1)
+
+	_, json_err := json.marshal(src, {spec = .JSON}, context.temp_allocator)
+	testing.expectf(t, json_err == json.Marshal_Data_Error.Non_Finite_Float, "JSON: %v", json_err)
+
+	qnan := transmute(u64)math.nan_f64()
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		data, err := json.marshal(src, {spec = spec}, context.temp_allocator)
+		testing.expectf(t, err == nil, "%v: marshal %v", spec, err)
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			dst: Floats
+			uerr := json.unmarshal(data, &dst, spec, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil, "%v %v %s: %v", spec, flags, data, uerr)
+			testing.expectf(t, transmute(u64)dst.nan == qnan && math.is_nan(dst.neg_nan), "%v %v: %v", spec, flags, dst)
+			testing.expectf(t, dst.inf == math.inf_f64(1) && dst.neg_inf == math.inf_f64(-1), "%v %v: %v", spec, flags, dst)
+			testing.expectf(t, math.is_nan(dst.nan32) && dst.inf16 == math.inf_f16(-1), "%v %v: %v", spec, flags, dst)
+			testing.expectf(t, dst.arr[0] == math.inf_f64(1) && transmute(u64)dst.arr[1] == qnan && dst.m["x"] == math.inf_f64(-1), "%v %v: %v", spec, flags, dst)
+		}
+	}
+}
+
+@(test)
+review_match_ignore_key_not_found :: proc(t: ^testing.T) {
+	v, err := json.parse_string(`{"a": {"b": 1}, "c": [2]}`)
+	defer json.destroy_value(v)
+	testing.expect_value(t, err, nil)
+
+	found, merr := json.match(v, "missing", "x", flags = {.Ignore_Key_Not_Found})
+	testing.expectf(t, found == nil && merr == .None, "%v %v", found, merr)
+	found, merr = json.match(v, "a", "missing", 0, flags = {.Ignore_Key_Not_Found})
+	testing.expectf(t, found == nil && merr == .None, "%v %v", found, merr)
+	found, merr = json.match(v, "missing", "x")
+	testing.expectf(t, merr == .Key_Not_Found, "%v %v", found, merr)
+	found, merr = json.match(v, "a", "b", flags = {.Ignore_Key_Not_Found})
+	b, _ := found.(json.Float)
+	testing.expectf(t, merr == .None && b == 1, "%v %v", found, merr)
+	found, merr = json.match(v, "c", "x", flags = {.Ignore_Key_Not_Found})
+	testing.expectf(t, merr == .Invalid_Type_For_Key, "%v %v", found, merr)
+	found, merr = json.match(v, "c", 0, flags = {.Ignore_Key_Not_Found})
+	c, _ := found.(json.Float)
+	testing.expectf(t, merr == .None && c == 2, "%v %v", found, merr)
 }

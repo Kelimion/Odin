@@ -729,9 +729,9 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 				return UNSUPPORTED_TYPE
 			case .NaN:
 				advance_token(p)
-				f: f64 = 0h7ff7ffffffffffff
+				f: f64 = 0h7ff8000000000001
 				if token.text[0] == '-' {
-					f = 0hfff7ffffffffffff
+					f = 0hfff8000000000001
 				}
 				if assign_float(v, f) {
 					return

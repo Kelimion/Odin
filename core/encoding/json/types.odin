@@ -28,7 +28,7 @@ Using one of these `Specification`s.
 
 		* All the same features as JSON5 plus extras.
 		* Assume an object definition at the root level (no need to surround entire file with { } ).
-		* Commas are optional, using comma insertion rules with newlines.
+		* Commas are optional; a line break after a value acts as one, so no line may start with a comma.
 		* Quotes around object keys are optional if the keys are valid identifiers.
 		* : can be replaced with =
 */
