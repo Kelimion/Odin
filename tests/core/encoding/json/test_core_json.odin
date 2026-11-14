@@ -1349,7 +1349,7 @@ unmarshal_values_that_do_not_fit :: proc(t: ^testing.T) {
 	testing.expect_value(t, v.f, 1e42)
 
 	// JSON5 and MJSON can represent non-finite floats.
-	testing.expect_value(t, json.unmarshal_string(`{"f": "inf"}`, &v, .JSON5), nil)
+	testing.expect_value(t, json.unmarshal_string(`{"f": "Infinity"}`, &v, .JSON5), nil)
 	testing.expect(t, math.is_inf(v.f))
 }
 

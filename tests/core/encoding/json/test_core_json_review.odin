@@ -1,6 +1,7 @@
 package test_core_json
 
 import "core:encoding/json"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -1155,6 +1156,132 @@ review_unmarshal_unvalidated_errors :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+review_unmarshal_number_text_grammar :: proc(t: ^testing.T) {
+	Int_Case :: struct {
+		text:  string,
+		value: i32,
+		json:  bool,
+		json5: bool,
+	}
+	INT_CASES :: []Int_Case{
+		{`"10"`,    10,  true,  true},
+		{`"-0"`,    0,   true,  true},
+		{`"-5"`,    -5,  true,  true},
+		{`"0x10"`,  16,  false, true},
+		{`"0X10"`,  16,  false, true},
+		{`"-0x10"`, -16, false, true},
+		{`"+5"`,    5,   false, true},
+		{`"1_000"`, 0,   false, false},
+		{`"0b101"`, 0,   false, false},
+		{`"0o17"`,  0,   false, false},
+		{`"0z10"`,  0,   false, false},
+		{`"0h10"`,  0,   false, false},
+		{`"01"`,    0,   false, false},
+		{`" 1"`,    0,   false, false},
+		{`"1 "`,    0,   false, false},
+		{`""`,      0,   false, false},
+		{`"-"`,     0,   false, false},
+		{`"1.0"`,   0,   false, false},
+		{`"1e3"`,   0,   false, false},
+		{`"NaN"`,   0,   false, false},
+	}
+	for spec in SPECS {
+		for c in INT_CASES {
+			want := c.json if spec == .JSON else c.json5
+			src := fmt.tprintf("[%s]", c.text)
+			v: [1]i32
+			err := json.unmarshal_string(src, &v, spec, context.temp_allocator)
+			if want {
+				testing.expectf(t, err == nil && v[0] == c.value, "%v %s: %v %v", spec, c.text, v[0], err)
+			} else {
+				_, is_type := err.(json.Unsupported_Type_Error)
+				testing.expectf(t, is_type, "%v %s: %v %v", spec, c.text, v[0], err)
+			}
+
+			key_src := fmt.tprintf("{{%s: 1}}", c.text)
+			m: map[i32]int
+			err = json.unmarshal_string(key_src, &m, spec, context.temp_allocator)
+			if want {
+				testing.expectf(t, err == nil && len(m) == 1 && m[c.value] == 1, "%v %s: %v %v", spec, key_src, m, err)
+			} else {
+				testing.expectf(t, err != nil, "%v %s: %v %v", spec, key_src, m, err)
+			}
+		}
+	}
+
+	Float_Case :: struct {
+		text:  string,
+		value: f64,
+		json:  bool,
+		json5: bool,
+	}
+	FLOAT_CASES :: []Float_Case{
+		{`"1.5"`,                0h3ff8000000000000, true,  true},
+		{`"-0"`,                 0h8000000000000000, true,  true},
+		{`"1e3"`,                0h408f400000000000, true,  true},
+		{`"7"`,                  0h401c000000000000, true,  true},
+		{`"Infinity"`,           0h7ff0000000000000, false, true},
+		{`"+Infinity"`,          0h7ff0000000000000, false, true},
+		{`"-Infinity"`,          0hfff0000000000000, false, true},
+		{`".5"`,                 0h3fe0000000000000, false, true},
+		{`"+1.5"`,               0h3ff8000000000000, false, true},
+		{`"5."`,                 0h4014000000000000, false, true},
+		{`"+.5"`,                0h3fe0000000000000, false, true},
+		{`"-5.e1"`,              0hc049000000000000, false, true},
+		{`"0x10"`,               0h4030000000000000, false, true},
+		{`"nan"`,                0, false, false},
+		{`"-nan"`,               0, false, false},
+		{`"NAN"`,                0, false, false},
+		{`"inf"`,                0, false, false},
+		{`"-inf"`,               0, false, false},
+		{`"infinity"`,           0, false, false},
+		{`"0h3ff0000000000000"`, 0, false, false},
+		{`"1_0.5"`,              0, false, false},
+		{`"0x1p4"`,              0, false, false},
+		{`"1.5 "`,               0, false, false},
+	}
+	for spec in SPECS {
+		for c in FLOAT_CASES {
+			want := c.json if spec == .JSON else c.json5
+			src := fmt.tprintf("[%s]", c.text)
+			v: [1]f64
+			err := json.unmarshal_string(src, &v, spec, context.temp_allocator)
+			if want {
+				testing.expectf(t, err == nil && transmute(u64)v[0] == transmute(u64)c.value, "%v %s: %v %v", spec, c.text, v[0], err)
+			} else {
+				_, is_type := err.(json.Unsupported_Type_Error)
+				testing.expectf(t, is_type, "%v %s: %v %v", spec, c.text, v[0], err)
+			}
+		}
+		for text in ([]string{`["NaN"]`, `["+NaN"]`, `["-NaN"]`}) {
+			v: [1]f64
+			err := json.unmarshal_string(text, &v, spec, context.temp_allocator)
+			if spec == .JSON {
+				_, is_type := err.(json.Unsupported_Type_Error)
+				testing.expectf(t, is_type, "%v %s: %v %v", spec, text, v[0], err)
+				continue
+			}
+			want: f64 = 0hfff8000000000001 if text[2] == '-' else 0h7ff8000000000001
+			testing.expectf(t, err == nil && transmute(u64)v[0] == transmute(u64)want, "%v %s: %v %v", spec, text, v[0], err)
+		}
+	}
+
+	S :: struct {
+		f: f64,
+		i: int,
+	}
+	for text in ([]string{"f = nan", "f = NAN", "f = inf", "f = Inf", "f = infinity", "f = -nan", "f = -inf", "i = abc"}) {
+		s: S
+		err := json.unmarshal_string(text, &s, .SJSON, context.temp_allocator)
+		testing.expectf(t, err != nil && s == {}, "%s: %v %v", text, s, err)
+	}
+	s: S
+	err := json.unmarshal_string("f = -Infinity, i = 0x10", &s, .SJSON, context.temp_allocator)
+	testing.expectf(t, err == nil && s.f == math.inf_f64(-1) && s.i == 16, "%v %v", s, err)
+}
+
 
 @(test)
 review_unmarshal_union_best_fit :: proc(t: ^testing.T) {

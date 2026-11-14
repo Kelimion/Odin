@@ -443,6 +443,32 @@ parse_integer :: proc(s: string) -> (value: i128, ok: bool) {
 	return -i128(acc) if neg else i128(acc), true
 }
 
+@(private, require_results)
+number_text_kind :: proc(s: string, spec: Specification) -> Token_Kind {
+	if spec != .JSON {
+		special := s
+		if len(special) > 0 && (special[0] == '-' || special[0] == '+') {
+			special = special[1:]
+		}
+		switch special {
+		case "Infinity":
+			return .Infinity
+		case "NaN":
+			return .NaN
+		}
+	}
+	t := make_tokenizer(s, spec, true)
+	token, err := get_token(&t)
+	if err != nil || len(token.text) != len(s) {
+		return .Invalid
+	}
+	#partial switch token.kind {
+	case .Integer, .Float:
+		return token.kind
+	}
+	return .Invalid
+}
+
 @(private)
 unmarshal_string_token_alloc :: proc(p: ^Parser, val: any, token: Token) -> (ok: bool, err: Error) {
 	str: string
@@ -529,6 +555,9 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 		return false, nil
 
 	case ^reflect.Type_Info_Integer:
+		if number_text_kind(str, p.spec) != .Integer {
+			return false, nil
+		}
 		i, pok := parse_integer(str)
 		if !pok {
 			return false, nil
@@ -540,8 +569,19 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 			return true, nil
 		}
 	case ^reflect.Type_Info_Float:
-		f, pok := strconv.parse_f64(str)
-		if !pok || p.spec == .JSON && !is_finite(f) {
+		f: f64
+		#partial switch number_text_kind(str, p.spec) {
+		case .Integer, .Float:
+			pok: bool
+			f, pok = parse_float(str)
+			if !pok || p.spec == .JSON && !is_finite(f) {
+				return false, nil
+			}
+		case .Infinity:
+			f = 0hfff0000000000000 if str[0] == '-' else 0h7ff0000000000000
+		case .NaN:
+			f = 0hfff8000000000001 if str[0] == '-' else 0h7ff8000000000001
+		case:
 			return false, nil
 		}
 		if assign_int(val, f) {
@@ -1207,7 +1247,7 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 
 		value: rawptr
 		inserted: bool
-		key_stored, value, inserted = unmarshal_map_insert(raw_map, t, key, raw_data(elem_backing))
+		key_stored, value, inserted = unmarshal_map_insert(raw_map, t, key, raw_data(elem_backing), p.spec)
 		if !inserted {
 			return Unsupported_Type_Error{id = v.id, token = start}
 		}
@@ -1251,7 +1291,7 @@ unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte, flags: 
 }
 
 @(private)
-unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, value: rawptr) -> (stored: bool, slot: rawptr, ok: bool) {
+unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, value: rawptr, spec: Specification) -> (stored: bool, slot: rawptr, ok: bool) {
 	key := key
 	key_ptr:  rawptr
 	key_cstr: cstring
@@ -1267,6 +1307,7 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 				key_ptr = &key_cstr
 			}
 		case ^runtime.Type_Info_Integer:
+			if number_text_kind(key, spec) != .Integer { return false, nil, false }
 			int_ok: bool
 			key_int, int_ok = parse_integer(key)
 			if !int_ok { return false, nil, false }
