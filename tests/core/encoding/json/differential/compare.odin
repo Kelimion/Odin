@@ -48,6 +48,7 @@ Error_Kind :: enum u8 {
 	Error,
 	Data,
 	Unsupported,
+	Unknown_Field,
 }
 
 Norm_Error :: struct {
@@ -65,6 +66,8 @@ norm_error_current :: proc(e: json.Unmarshal_Error) -> (n: Norm_Error) {
 		n.kind, n.code = .Data, int(v)
 	case json.Unsupported_Type_Error:
 		n.kind, n.id, n.token = .Unsupported, v.id, norm_token_current(v.token)
+	case json.Unknown_Field_Error:
+		n.kind, n.id, n.token = .Unknown_Field, v.id, norm_token_current(v.token)
 	}
 	return
 }
@@ -91,6 +94,7 @@ fmt_error :: proc(n: Norm_Error) -> string {
 	case .Error:       return fmt.tprintf("Error.%v", json.Error(n.code))
 	case .Data:        return fmt.tprintf("Unmarshal_Data_Error.%v", json.Unmarshal_Data_Error(n.code))
 	case .Unsupported: return fmt.tprintf("Unsupported_Type_Error{{id=%v, token=%s}}", n.id, fmt_token(n.token))
+	case .Unknown_Field: return fmt.tprintf("Unknown_Field_Error{{id=%v, token=%s}}", n.id, fmt_token(n.token))
 	}
 	return ""
 }
@@ -316,14 +320,14 @@ diff_values :: proc(a, b: rawptr, ta, tb: ^reflect.Type_Info, flags := Diff_Flag
 
 	case ^reflect.Type_Info_Union:
 		ib := bb.variant.(^reflect.Type_Info_Union)
-		if reflect.type_info_union_is_pure_maybe(ia) {
+		if reflect.type_info_union_is_pure_maybe(ia^) {
 			pa, pb := (^rawptr)(a)^, (^rawptr)(b)^
 			if (pa == nil) != (pb == nil) {
 				return fmt.tprintf(": pointer is nil=%v in current, nil=%v in reference", pa == nil, pb == nil)
 			}
 			return ""
 		}
-		tag_a, tag_b := read_union_tag(a, ia), read_union_tag(b, ib)
+		tag_a, tag_b := read_union_tag(a, ia^), read_union_tag(b, ib^)
 		if tag_a != tag_b {
 			return fmt.tprintf(": union tag %d in current, %d in reference", tag_a, tag_b)
 		}
