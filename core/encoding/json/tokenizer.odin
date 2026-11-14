@@ -188,6 +188,17 @@ string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, clo
 
 @(require_results)
 get_token :: proc(t: ^Tokenizer) -> (token: Token, err: Error) #no_bounds_check {
+	for {
+		comment: bool
+		token, err, comment = get_token_or_comment(t)
+		if !comment {
+			return
+		}
+	}
+}
+
+@(private="file", require_results)
+get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err: Error, comment: bool) #no_bounds_check {
 	data  := t.data
 	start := t.offset
 	end   := 0
@@ -295,7 +306,7 @@ get_token :: proc(t: ^Tokenizer) -> (token: Token, err: Error) #no_bounds_check 
 }
 
 @(private="file", require_results)
-get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: Error) {
+get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: Error, comment: bool) {
 	skip_digits :: proc(t: ^Tokenizer) {
 		if i := digits_end(t.data, t.offset); i != t.offset {
 			move_to(t, i)
@@ -490,14 +501,16 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 			case '/':
 				// Single-line comments
 				skip_to_next_line(t)
-				return get_token(t)
+				comment = true
+				return
 			case '*':
 				// None-nested multi-line comments
 				for t.offset < len(t.data) {
 					if next_rune(t) == '*' {
 						if next_rune(t) == '/' {
 							next_rune(t)
-							return get_token(t)
+							comment = true
+							return
 						}
 					}
 				}

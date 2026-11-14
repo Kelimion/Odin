@@ -6,20 +6,24 @@ import "core:mem"
 @(require_results)
 is_valid :: proc(data: []byte, spec := DEFAULT_SPECIFICATION, parse_integers := false) -> bool {
 	p := make_parser(data, spec, parse_integers, mem.nil_allocator())
+	return validate_document(&p)
+}
 
+@(private, require_results)
+validate_document :: proc(p: ^Parser) -> bool {
 	switch p.spec {
 	case .JSON:
-		return validate_value(&p) && at_end(&p)
+		return validate_value(p) && at_end(p)
 	case .JSON5:
-		return validate_value(&p)
+		return validate_value(p)
 	case .MJSON:
 		#partial switch p.curr_token.kind {
 		case .Ident, .String:
-			return validate_object_body(&p, .EOF)
+			return validate_object_body(p, .EOF)
 		}
-		return validate_value(&p)
+		return validate_value(p)
 	}
-	return validate_object(&p)
+	return validate_object(p)
 }
 
 @(require_results)
@@ -36,6 +40,10 @@ validate_object_key :: proc(p: ^Parser) -> bool {
 
 @(require_results)
 validate_object_body :: proc(p: ^Parser, end_token: Token_Kind) -> bool {
+	p.depth += 1
+	if p.depth > MAX_DEPTH {
+		return false
+	}
 	for p.curr_token.kind != end_token {
 		if !validate_object_key(p) {
 			return false
@@ -49,6 +57,7 @@ validate_object_body :: proc(p: ^Parser, end_token: Token_Kind) -> bool {
 			break
 		}
 	}
+	p.depth -= 1
 	return true
 }
 
@@ -71,6 +80,10 @@ validate_array :: proc(p: ^Parser) -> bool {
 	if err := expect_token(p, .Open_Bracket); err != .None {
 		return false
 	}
+	p.depth += 1
+	if p.depth > MAX_DEPTH {
+		return false
+	}
 
 	for p.curr_token.kind != .Close_Bracket {
 		if !validate_value(p) {
@@ -86,6 +99,7 @@ validate_array :: proc(p: ^Parser) -> bool {
 		return false
 	}
 
+	p.depth -= 1
 	return true
 }
 

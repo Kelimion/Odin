@@ -48,6 +48,8 @@ Specification :: enum {
 
 DEFAULT_SPECIFICATION :: Specification.JSON5
 
+MAX_DEPTH :: #config(JSON_MAX_DEPTH, 128)
+
 Null    :: distinct rawptr
 Integer :: i64
 Float   :: f64
@@ -84,7 +86,8 @@ Error :: enum {
 	Expected_String_For_Object_Key,
 	Duplicate_Object_Key,
 	Expected_Colon_After_Key,
-	
+	Max_Depth_Exceeded,
+
 	// Allocating Errors
 	Invalid_Allocator,
 	Out_Of_Memory,

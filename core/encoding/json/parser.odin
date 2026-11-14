@@ -13,6 +13,7 @@ Parser :: struct {
 	spec:           Specification,
 	allocator:      mem.Allocator,
 	parse_integers: bool,
+	depth:          int,
 }
 
 make_parser :: proc{
@@ -264,6 +265,11 @@ skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
 		}
 	case .Open_Brace:
 		expect_token(p, .Open_Brace) or_return
+		p.depth += 1
+		defer p.depth -= 1
+		if p.depth > MAX_DEPTH {
+			return .Max_Depth_Exceeded
+		}
 		for p.curr_token.kind != .Close_Brace {
 			if check_tokens && p.curr_token_err == .Invalid_String {
 				return .Invalid_String
@@ -281,6 +287,11 @@ skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
 		return expect_closing_token(p, .Close_Brace)
 	case .Open_Bracket:
 		expect_token(p, .Open_Bracket) or_return
+		p.depth += 1
+		defer p.depth -= 1
+		if p.depth > MAX_DEPTH {
+			return .Max_Depth_Exceeded
+		}
 		for p.curr_token.kind != .Close_Bracket {
 			skip_value(p, check_tokens) or_return
 
@@ -302,6 +313,11 @@ skip_value :: proc(p: ^Parser, check_tokens := false) -> Error {
 parse_array :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: Error) {
 	err = .None
 	expect_token(p, .Open_Bracket) or_return
+	p.depth += 1
+	defer p.depth -= 1
+	if p.depth > MAX_DEPTH {
+		return nil, .Max_Depth_Exceeded
+	}
 
 	array: Array
 	array.allocator = p.allocator
@@ -394,6 +410,11 @@ parse_object_key_view :: proc(p: ^Parser, buf: []byte) -> (key: string, allocate
 
 @(require_results)
 parse_object_body :: proc(p: ^Parser, end_token: Token_Kind, loc := #caller_location) -> (obj: Object, err: Error) {
+	p.depth += 1
+	defer p.depth -= 1
+	if p.depth > MAX_DEPTH {
+		return nil, .Max_Depth_Exceeded
+	}
 	obj = make(Object, allocator=p.allocator, loc=loc)
 
 	defer if err != nil {

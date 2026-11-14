@@ -1,6 +1,8 @@
 package test_core_json
 
 import "core:encoding/json"
+import "core:mem"
+import "core:strings"
 import "core:testing"
 import "base:runtime"
 
@@ -131,4 +133,154 @@ values_equal :: proc(a, b: json.Value) -> bool {
 		return true
 	}
 	return b == nil
+}
+
+nested :: proc(open, close: string, depth: int, inner := "1") -> string {
+	b := make([dynamic]byte, 0, depth*(len(open)+len(close)) + len(inner), context.temp_allocator)
+	for _ in 0..<depth {
+		append(&b, open)
+	}
+	append(&b, inner)
+	for _ in 0..<depth {
+		append(&b, close)
+	}
+	return string(b[:])
+}
+
+Node :: struct {
+	c: []Node,
+}
+
+MNode :: struct {
+	m: map[string]MNode,
+}
+
+UArr :: union {
+	[]UArr,
+	int,
+}
+
+UMap :: union {
+	map[string]UMap,
+	int,
+}
+
+UStruct :: struct {
+	u: UStructU,
+}
+
+UStructU :: union {
+	[]UStruct,
+	int,
+}
+
+Nest_Key :: enum {
+	A,
+}
+
+ENode :: struct {
+	e: [Nest_Key][]ENode,
+}
+
+UMapArr :: union {
+	map[string]UMapArr,
+	[]int,
+}
+
+typed_nesting :: proc(t: ^testing.T, $T: typeid, name, open, close, inner: string, per_level, extra: int) {
+	for depth in ([]int{json.MAX_DEPTH, json.MAX_DEPTH + per_level, 100_000}) {
+		levels := (depth - extra) / per_level
+		src := nested(open, close, levels, inner)
+		ok := levels*per_level + extra <= json.MAX_DEPTH
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			x: T
+			err := json.unmarshal_string(src, &x, allocator = context.temp_allocator, flags = flags)
+			testing.expectf(t, (err == nil) == ok && (ok || err == json.Error.Max_Depth_Exceeded), "%s depth %d %v: %v", name, depth, flags, err)
+		}
+
+		x: T
+		p := json.make_parser(src, parse_integers = true, allocator = context.temp_allocator)
+		err := json.unmarshal_value(&p, x)
+		testing.expectf(t, (err == nil) == ok && (ok || err == json.Error.Max_Depth_Exceeded), "%s depth %d unmarshal_value: %v", name, depth, err)
+	}
+}
+
+@(test)
+review_nesting_limit :: proc(t: ^testing.T) {
+	Shape :: struct {
+		open, close, inner: string,
+		per_level:          int,
+	}
+	SHAPES := []Shape{
+		{"[", "]", "1", 1},
+		{`{"a":`, "}", "1", 1},
+		{`[{"a":`, "}]", "1", 2},
+	}
+	for shape in SHAPES {
+		for spec in ([]json.Specification{.JSON, .JSON5, .SJSON}) {
+			for depth in ([]int{json.MAX_DEPTH, json.MAX_DEPTH + 1, 100_000}) {
+				levels := depth / shape.per_level
+				src := nested(shape.open, shape.close, levels, shape.inner)
+				ok := levels*shape.per_level <= json.MAX_DEPTH
+
+				testing.expectf(t, json.is_valid(transmute([]byte)src, spec) == ok, "%v depth %d %s: is_valid", spec, depth, shape.open)
+
+				v, err := json.parse_string(src, spec)
+				testing.expectf(t, (err == nil) == ok && (ok || err == .Max_Depth_Exceeded), "%v depth %d %s: parse %v", spec, depth, shape.open, err)
+				json.destroy_value(v)
+
+				for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+					value: json.Value
+					uerr := json.unmarshal_string(src, &value, spec, flags = flags)
+					testing.expectf(t, (uerr == nil) == ok && (ok || uerr == json.Error.Max_Depth_Exceeded), "%v depth %d %s %v: unmarshal %v", spec, depth, shape.open, flags, uerr)
+					json.destroy_value(value)
+
+					skipped: struct{ b: int }
+					wrapped := strings.concatenate({`{"a":`, src, `,"b":2}`}, context.temp_allocator)
+					serr := json.unmarshal_string(wrapped, &skipped, spec, flags = flags)
+					wrapped_ok := levels*shape.per_level + 1 <= json.MAX_DEPTH
+					testing.expectf(t, (serr == nil) == wrapped_ok && (wrapped_ok || serr == json.Error.Max_Depth_Exceeded), "%v depth %d %s %v: skip %v", spec, depth, shape.open, flags, serr)
+				}
+			}
+		}
+	}
+
+	typed_nesting(t, Node,    "Node",    `{"c":[`,      "]}",  "",     2, 0)
+	typed_nesting(t, MNode,   "MNode",   `{"m":{"k":`,  "}}",  "null", 2, 0)
+	typed_nesting(t, UArr,    "UArr",    "[",           "]",   "1",    1, 0)
+	typed_nesting(t, UMap,    "UMap",    `{"k":`,       "}",   "1",    1, 0)
+	typed_nesting(t, UStruct, "UStruct", `{"u":[`,      "]}",  "",     2, 0)
+	typed_nesting(t, ENode,   "ENode",   `{"e":{"A":[`, "]}}", "",     3, 0)
+	typed_nesting(t, UMapArr, "UMapArr", `{"k":`,       "}",   "[]",   1, 1)
+
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		x: UArr
+		p := json.make_parser(nested("[", "]", 100_000), parse_integers = true, allocator = mem.tracking_allocator(&track))
+		err := json.unmarshal_value(&p, x, flags)
+		testing.expectf(t, err == json.Error.Max_Depth_Exceeded && track.total_allocation_count == 0, "%v: %v after %d allocations", flags, err, track.total_allocation_count)
+	}
+
+	root := strings.concatenate({"a: ", nested("[", "]", json.MAX_DEPTH)}, context.temp_allocator)
+	testing.expect(t, !json.is_valid(transmute([]byte)root, .SJSON))
+	_, root_err := json.parse_string(root, .SJSON, allocator = context.temp_allocator)
+	testing.expect_value(t, root_err, json.Error.Max_Depth_Exceeded)
+}
+
+@(test)
+review_many_comments :: proc(t: ^testing.T) {
+	for comment in ([]string{"/**/", "//\n", "/* a */\n"}) {
+		b := make([dynamic]byte, 0, 100_000*len(comment) + 1, context.temp_allocator)
+		for _ in 0..<100_000 {
+			append(&b, comment)
+		}
+		append(&b, '1')
+		for spec in ([]json.Specification{.JSON5, .SJSON}) {
+			v, err := json.parse(b[:], spec)
+			testing.expectf(t, err == nil && values_equal(v, json.Float(1)), "%v %q: %v, %v", spec, comment, v, err)
+			testing.expectf(t, json.is_valid(b[:], spec), "%v %q: is_valid", spec, comment)
+		}
+	}
 }
