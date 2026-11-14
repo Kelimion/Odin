@@ -275,7 +275,7 @@ jobs:
         arch: [amd64, i386]
     env:
       ODIN_TARGET: -target:windows_${{ matrix.arch }}
-      ODIN_ASAN: ${{ matrix.arch == 'amd64' && '-sanitize:address' || '' }}
+      ODIN_ASAN: ${{ matrix.arch == 'amd64' && '-sanitize:address -define:JSON_MAX_DEPTH=64' || '' }}
     steps:
       - uses: actions/checkout@v7
       - name: Fetch vendor libraries under test from Git LFS
