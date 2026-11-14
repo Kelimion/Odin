@@ -166,9 +166,10 @@ string_stop :: proc "contextless" (s: string, i: int, quote: byte) -> int #no_bo
 	return i
 }
 
+
 // Where the string token at `s[start]` ends, as `scan_string` finds it: after its closing quote, or
-// at a newline or the end of `s` that leaves it unterminated. No other byte matters, as no escape or
-// UTF-8 sequence can hide a quote or a newline.
+// at a newline or the end of `s` that leaves it unterminated. No other byte matters: an escape hides
+// at most the quote, backslash or line break after it, and no UTF-8 sequence holds a quote or a newline.
 @(private="file")
 string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, closed: bool) #no_bounds_check {
 	quote := s[start]
@@ -180,6 +181,9 @@ string_token_end :: proc "contextless" (s: string, start: int) -> (end: int, clo
 		}
 		if s[i] == quote {
 			return i + 1, true
+		}
+		if i+2 < len(s) && s[i+1] == '\r' && s[i+2] == '\n' {
+			i += 1
 		}
 		i += 2
 	}
@@ -709,7 +713,9 @@ scan_string :: proc(t: ^Tokenizer, start: int) -> (end: int, err: Error) #no_bou
 			_ = scan_escape(t)
 			i = t.offset
 		case c < ' ':
-			invalid = true
+			if t.spec == .JSON || c == '\r' {
+				invalid = true
+			}
 			i += 1
 		case escaped:
 			i += 1
@@ -750,6 +756,10 @@ scan_escape :: proc(t: ^Tokenizer) -> bool {
 			}
 		}
 		return true
+	case '\r':
+		if next_rune(t) == '\n' {
+			next_rune(t)
+		}
 	case:
 		// Ignore the next rune regardless
 		next_rune(t)
@@ -899,10 +909,12 @@ check_string_literal :: proc(str: string, spec: Specification) -> (valid, valid_
 				}
 				i += 1
 			case '\r':
-				if spec != .JSON && i+1 < len(s) && s[i+1] == '\n' {
-					i += 2
-				} else {
+				if spec == .JSON {
 					return
+				}
+				i += 1
+				if i < len(s) && s[i] == '\n' {
+					i += 1
 				}
 			case '\n':
 				if spec != .JSON {
@@ -910,6 +922,25 @@ check_string_literal :: proc(str: string, spec: Specification) -> (valid, valid_
 				} else {
 					return
 				}
+			case 'v':
+				if spec == .JSON {
+					return
+				}
+				i += 1
+			case '0':
+				if spec == .JSON || i+1 < len(s) && '0' <= s[i+1] && s[i+1] <= '9' {
+					return
+				}
+				i += 1
+			case 'x':
+				if spec == .JSON || i+2 >= len(s) {
+					return
+				}
+				_ = hex_digit_value(s[i+1]) or_return
+				_ = hex_digit_value(s[i+2]) or_return
+				i += 3
+			case '1'..='9':
+				return
 			case 'u':
 				if i >= len(s) {
 					return
@@ -931,11 +962,20 @@ check_string_literal :: proc(str: string, spec: Specification) -> (valid, valid_
 					}
 				}
 
-			case: return
+			case:
+				if spec == .JSON {
+					return
+				}
 			}
 
-		case c == quote, c < ' ':
+		case c == quote:
 			return
+
+		case c < ' ':
+			if spec == .JSON || c == '\n' || c == '\r' {
+				return
+			}
+			i += 1
 
 		case c < utf8.RUNE_SELF:
 			i = plain_run_end(s, i, quote)

@@ -1052,16 +1052,24 @@ keys_checked_like_values :: proc(t: ^testing.T) {
 		Red,
 		Green,
 	}
-	bad := [?]string{
-		"{\"a\tb\":1}",
-		"{\"c\r\":5}",
-		"{\"\xff\":1}",
-		"{\"\\q\":1}",
-		"{\"\\u12\":1}",
-		"{\"a\":1,\"x\":{\"k\x01\":2}}", // in a value that is skipped
+	Bad :: struct {
+		src:   string,
+		specs: bit_set[json.Specification],
 	}
-	for s in bad {
-		for spec in ([?]json.Specification{.JSON, .JSON5, .MJSON}) {
+	ALL_SPECS :: bit_set[json.Specification]{.JSON, .JSON5, .MJSON}
+	bad := [?]Bad{
+		{"{\"a\tb\":1}", {.JSON}},
+		{"{\"c\r\":5}", ALL_SPECS},
+		{"{\"\xff\":1}", ALL_SPECS},
+		{"{\"\\q\":1}", {.JSON}},
+		{"{\"\\1\":1}", ALL_SPECS},
+		{"{\"\\u12\":1}", ALL_SPECS},
+		{"{\"a\":1,\"x\":{\"k\x01\":2}}", {.JSON}}, // in a value that is skipped
+		{"{\"a\":1,\"x\":{\"k\\1\":2}}", ALL_SPECS},
+	}
+	for b in bad {
+		s := b.src
+		for spec in b.specs {
 			testing.expectf(t, !json.is_valid(transmute([]byte)s, spec), "is_valid accepts %q (%v)", s, spec)
 
 			target: Target

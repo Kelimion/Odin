@@ -307,7 +307,7 @@ review_strict_numbers_and_strings :: proc(t: ^testing.T) {
 	for src in ([]string{`[1e]`, `[01]`, `[-01]`, `[1.]`, `[1.e5]`, `[.5]`, `[1e+]`, `["\q"]`, "[\"a\x01b\"]", `["a`, `["\uZZZZ"]`, `['a']`, `[+1]`, `[-Infinity]`, `[NaN]`}) {
 		expect_document(t, src, .JSON, false)
 	}
-	for src in ([]string{`[0e]`, `[01]`, `[-01]`, `[1e+]`, "[\"a\x01b\"]", `["a`, `['a`, `["\uZZZZ"]`, `['\ug000']`}) {
+	for src in ([]string{`[0e]`, `[01]`, `[-01]`, `[1e+]`, `["a`, `['a`, `["\uZZZZ"]`, `['\ug000']`}) {
 		expect_document(t, src, .JSON5, false)
 		expect_document(t, src, .SJSON, false)
 	}
@@ -320,12 +320,13 @@ review_strict_numbers_and_strings :: proc(t: ^testing.T) {
 			expect_document(t, src, spec, true)
 		}
 	}
-	for src in ([]string{"{\"a\x01\":1}", `{"\uZZZZ":1}`, `{"a":1e}`, `{"a":{"b":01}}`}) {
+	for src in ([]string{`{"\uZZZZ":1}`, `{"a":1e}`, `{"a":{"b":01}}`}) {
 		for spec in SPECS {
 			expect_document(t, src, spec, false)
 		}
 	}
 	expect_document(t, `{"\q":1}`, .JSON, false)
+	expect_document(t, "{\"a\x01\":1}", .JSON, false)
 	expect_document(t, `{'a':1}`, .JSON, false)
 	expect_document(t, `{'a':1}`, .JSON5, true)
 
@@ -623,5 +624,88 @@ review_json5_numbers :: proc(t: ^testing.T) {
 		p := json.make_parser(`[0x1F, -0x10, 0x20000000000003]`, spec, false, context.temp_allocator)
 		err = json.unmarshal_value(&p, floats)
 		testing.expectf(t, err == nil && len(floats) == 3 && floats[0] == 31 && floats[1] == -16 && floats[2] == 0h4340000000000002, "%v: %v, %v", spec, floats, err)
+	}
+}
+
+@(test)
+review_json5_strings :: proc(t: ^testing.T) {
+	Case :: struct {
+		src, want: string,
+	}
+	CASES := []Case{
+		{"[\"a\\\nb\"]", "ab"},
+		{"[\"a\\\rb\"]", "ab"},
+		{"[\"a\\\r\nb\"]", "ab"},
+		{"[\"a\\\xe2\x80\xa8b\"]", "ab"},
+		{"[\"a\\\xe2\x80\xa9b\"]", "ab"},
+		{"[\"\\\n\"]", ""},
+		{"['a\\\r\nb']", "ab"},
+		{"[\"\\x41\"]", "A"},
+		{"[\"\\xe9\\xFF\"]", "\xc3\xa9\xc3\xbf"},
+		{"[\"a\\0b\"]", "a\x00b"},
+		{"[\"\\0\"]", "\x00"},
+		{"[\"\\v\"]", "\v"},
+		{"[\"\\q\"]", "q"},
+		{"[\"\\\xc3\xa9\"]", "\xc3\xa9"},
+		{"[\"\\\xe2\x80\xaf\"]", "\xe2\x80\xaf"},
+		{"[\"\\\t\"]", "\t"},
+		{"[\"a\tb\"]", "a\tb"},
+		{"[\"a\x01\x1fb\"]", "a\x01\x1fb"},
+		{"[\"\\x41\\\n\\q\t\"]", "Aq\t"},
+		{"['\\q\t\\'']", "q\t'"},
+	}
+	for c in CASES {
+		for spec in ([]json.Specification{.JSON5, .SJSON}) {
+			expect_document(t, c.src, spec, true)
+
+			v, err := json.parse_string(c.src, spec)
+			arr, _ := v.(json.Array)
+			s: json.String
+			if len(arr) == 1 {
+				s, _ = arr[0].(json.String)
+			}
+			testing.expectf(t, err == nil && s == c.want, "%v %q: parse %q, %v", spec, c.src, v, err)
+			json.destroy_value(v)
+
+			for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+				x: []string
+				uerr := json.unmarshal_string(c.src, &x, spec, context.temp_allocator, flags)
+				testing.expectf(t, uerr == nil && len(x) == 1 && x[0] == c.want, "%v %q %v: unmarshal %q, %v", spec, c.src, flags, x, uerr)
+			}
+		}
+		expect_document(t, c.src, .JSON, false)
+	}
+
+	for src in ([]string{"[\"\\1\"]", "[\"\\9\"]", "[\"\\01\"]", "[\"\\08\"]", "[\"\\x4\"]", "[\"\\x\"]", "[\"\\xg1\"]", "[\"\\x4g\"]", "[\"a\rb\"]", "[\"a\nb\"]", "[\"\\q\r\"]", "[\"\\", "['\\x4']", "{\"\\1\":1}"}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, false)
+		}
+	}
+
+	for lit in ([]string{"\"a\nb\"", "\"a\rb\"", "\"\\qa\nb\"", "\"\\qa\rb\"", "\"\x01\\1\""}) {
+		testing.expectf(t, !json.is_valid_string_literal(lit, .JSON5), "%q", lit)
+	}
+	for lit in ([]string{"\"a\tb\"", "\"\\qa\tb\"", "\"\\qa\x01b\""}) {
+		testing.expectf(t, json.is_valid_string_literal(lit, .JSON5), "%q", lit)
+		testing.expectf(t, !json.is_valid_string_literal(lit, .JSON), "%q", lit)
+	}
+
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			x: []string
+			err := json.unmarshal_string("[\"a\\\r\nb\", \"c\", 'd\\\re', \"\\\r\n\"]", &x, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && len(x) == 4 && x[0] == "ab" && x[1] == "c" && x[2] == "de" && x[3] == "", "%v %v: %q, %v", spec, flags, x, err)
+
+			m: map[string]int
+			err = json.unmarshal_string("{\"a\\qb\": 1, \"c\\\r\nd\": 2, \"\\x41\": 3}", &m, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && len(m) == 3 && m["aqb"] == 1 && m["cd"] == 2 && m["A"] == 3, "%v %v: %v, %v", spec, flags, m, err)
+
+			Fields :: struct {
+				aqb, cd: int,
+			}
+			f: Fields
+			err = json.unmarshal_string("{\"a\\qb\": 1, \"c\\\nd\": 2}", &f, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && f.aqb == 1 && f.cd == 2, "%v %v: %v, %v", spec, flags, f, err)
+		}
 	}
 }

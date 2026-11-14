@@ -640,7 +640,26 @@ unquote_escapes :: proc(s: string, i, w: int, quote: byte, spec: Specification, 
 				break loop
 			}
 			switch s[i] {
-			case: break loop
+			case:
+				if spec == .JSON {
+					break loop
+				}
+				if s[i] == 0xe2 && i+2 < len(s) && s[i+1] == 0x80 && (s[i+2] == 0xa8 || s[i+2] == 0xa9) {
+					i += 3
+				}
+			case '\n':
+				if spec == .JSON {
+					break loop
+				}
+				i += 1
+			case '\r':
+				if spec == .JSON {
+					break loop
+				}
+				i += 1
+				if i < len(s) && s[i] == '\n' {
+					i += 1
+				}
 			case '"',  '\'', '\\', '/':
 				b[w] = s[i]
 				i += 1
@@ -721,8 +740,16 @@ unquote_escapes :: proc(s: string, i, w: int, quote: byte, spec: Specification, 
 				}
 			}
 
-		case c == quote, c < ' ':
+		case c == quote:
 			break loop
+
+		case c < ' ':
+			if spec == .JSON {
+				break loop
+			}
+			b[w] = c
+			i += 1
+			w += 1
 
 		case valid:
 			end := string_stop(s, i, quote)
