@@ -21,10 +21,18 @@ Unsupported_Type_Error :: struct {
 	field: string,
 }
 
+// A key that matches no field of the struct `id`, returned only with `.Disallow_Unknown_Fields`
+Unknown_Field_Error :: struct {
+	id:    typeid,
+	token: Token,
+	field: string,
+}
+
 Unmarshal_Error :: union {
 	Error,
 	Unmarshal_Data_Error,
 	Unsupported_Type_Error,
+	Unknown_Field_Error,
 }
 
 Unmarshal_Flag :: enum {
@@ -37,6 +45,17 @@ Unmarshal_Flag :: enum {
 
 	// Accept duplicate keys for a struct field, the last value winning, rather than returning `.Multiple_Use_Field`
 	Allow_Duplicate_Fields,
+
+	// Return an `Unknown_Field_Error` for a key that matches no struct field, rather than skipping it
+	Disallow_Unknown_Fields,
+
+	// Require a fixed-length array, enumerated array, or complex number to be given every element,
+	// rather than leaving the missing trailing elements unchanged
+	Disallow_Short_Arrays,
+
+	// Return an `Unsupported_Type_Error` for an integer, or an integral float, that doesn't fit its integer type,
+	// rather than wrapping it as a conversion would
+	Disallow_Integer_Wrap,
 }
 Unmarshal_Flags :: distinct bit_set[Unmarshal_Flag]
 
@@ -191,38 +210,66 @@ assign_bool :: proc(val: any, b: bool) -> bool {
 	return true
 }
 @(private)
-assign_int :: proc(val: any, i: $T) -> bool {
+is_finite :: proc "contextless" (f: f64) -> bool {
+	return !math.is_nan(f) && !math.is_inf(f)
+}
+
+// Whether `i` is a value of the integer type `D`, so converting it loses nothing
+@(private)
+integer_fits :: proc "contextless" (i: $T, $D: typeid) -> bool where intrinsics.type_is_integer(D) {
+	when intrinsics.type_is_float(T) {
+		return f64(min(D)) <= f64(i) && f64(i) < f64(max(D)) + 1
+	} else when intrinsics.type_is_unsigned(T) {
+		return u128(i) <= u128(max(D))
+	} else when intrinsics.type_is_unsigned(D) {
+		return i >= 0 && u128(i) <= u128(max(D))
+	} else {
+		return i128(min(D)) <= i128(i) && i128(i) <= i128(max(D))
+	}
+}
+
+// With `fits_only`, an integer type is assigned only a value it holds unchanged
+@(private)
+assign_int :: proc(val: any, i: $T, fits_only := false) -> bool {
+	set :: #force_inline proc "contextless" (dst: ^$D, i: $T, fits_only: bool) -> bool {
+		if fits_only && !integer_fits(i, D) {
+			return false
+		}
+		dst^ = D(i)
+		return true
+	}
+
 	v := reflect.any_core(val)
 	switch &dst in v {
-	case i8:      dst = i8     (i)
-	case i16:     dst = i16    (i)
-	case i16le:   dst = i16le  (i)
-	case i16be:   dst = i16be  (i)
-	case i32:     dst = i32    (i)
-	case i32le:   dst = i32le  (i)
-	case i32be:   dst = i32be  (i)
-	case i64:     dst = i64    (i)
-	case i64le:   dst = i64le  (i)
-	case i64be:   dst = i64be  (i)
-	case i128:    dst = i128   (i)
-	case i128le:  dst = i128le (i)
-	case i128be:  dst = i128be (i)
-	case u8:      dst = u8     (i)
-	case u16:     dst = u16    (i)
-	case u16le:   dst = u16le  (i)
-	case u16be:   dst = u16be  (i)
-	case u32:     dst = u32    (i)
-	case u32le:   dst = u32le  (i)
-	case u32be:   dst = u32be  (i)
-	case u64:     dst = u64    (i)
-	case u64le:   dst = u64le  (i)
-	case u64be:   dst = u64be  (i)
-	case u128:    dst = u128   (i)
-	case u128le:  dst = u128le (i)
-	case u128be:  dst = u128be (i)
-	case int:     dst = int    (i)
-	case uint:    dst = uint   (i)
-	case uintptr: dst = uintptr(i)
+	case i8:      return set(&dst, i, fits_only)
+	case i16:     return set(&dst, i, fits_only)
+	case i16le:   return set(&dst, i, fits_only)
+	case i16be:   return set(&dst, i, fits_only)
+	case i32:     return set(&dst, i, fits_only)
+	case i32le:   return set(&dst, i, fits_only)
+	case i32be:   return set(&dst, i, fits_only)
+	case i64:     return set(&dst, i, fits_only)
+	case i64le:   return set(&dst, i, fits_only)
+	case i64be:   return set(&dst, i, fits_only)
+	case i128:    return set(&dst, i, fits_only)
+	case i128le:  return set(&dst, i, fits_only)
+	case i128be:  return set(&dst, i, fits_only)
+	case u8:      return set(&dst, i, fits_only)
+	case u16:     return set(&dst, i, fits_only)
+	case u16le:   return set(&dst, i, fits_only)
+	case u16be:   return set(&dst, i, fits_only)
+	case u32:     return set(&dst, i, fits_only)
+	case u32le:   return set(&dst, i, fits_only)
+	case u32be:   return set(&dst, i, fits_only)
+	case u64:     return set(&dst, i, fits_only)
+	case u64le:   return set(&dst, i, fits_only)
+	case u64be:   return set(&dst, i, fits_only)
+	case u128:    return set(&dst, i, fits_only)
+	case u128le:  return set(&dst, i, fits_only)
+	case u128be:  return set(&dst, i, fits_only)
+	case int:     return set(&dst, i, fits_only)
+	case uint:    return set(&dst, i, fits_only)
+	case uintptr: return set(&dst, i, fits_only)
 	case:
 		is_bit_set_different_endian_to_platform :: proc(ti: ^runtime.Type_Info) -> bool {
 			if ti == nil {
@@ -360,7 +407,7 @@ unmarshal_string_token_alloc :: proc(p: ^Parser, val: any, token: Token) -> (ok:
 }
 
 @(private)
-unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.Type_Info) -> (ok: bool, err: Error) {
+unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.Type_Info, flags := Unmarshal_Flags{}) -> (ok: bool, err: Error) {
 	if val.id == string || val.id == cstring {
 		return unmarshal_string_token_alloc(p, val, token)
 	}
@@ -400,15 +447,14 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 				return true, nil
 			}
 		}
-		// TODO(bill): should this be an error or not?
-		return true, nil
+		return false, nil
 
 	case ^reflect.Type_Info_Integer:
 		i, pok := parse_integer(str)
 		if !pok {
 			return false, nil
 		}
-		if assign_int(val, i) {
+		if assign_int(val, i, .Disallow_Integer_Wrap in flags) {
 			return true, nil
 		}
 		if assign_float(val, i) {
@@ -416,7 +462,7 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 		}
 	case ^reflect.Type_Info_Float:
 		f, pok := strconv.parse_f64(str)
-		if !pok {
+		if !pok || p.spec == .JSON && !is_finite(f) {
 			return false, nil
 		}
 		if assign_int(val, f) {
@@ -466,8 +512,9 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 					assign_int(tag, raw_tag)
 					return
 				}
-				if e, is_type := err.(Unsupported_Type_Error); is_type {
-					delete(e.field, p.allocator)
+				#partial switch e in err {
+				case Unsupported_Type_Error: delete(e.field, p.allocator)
+				case Unknown_Field_Error:    delete(e.field, p.allocator)
 				}
 			}
 			return UNSUPPORTED_TYPE
@@ -508,22 +555,44 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 
 	case .Integer:
 		advance_token(p)
-		i, _ := parse_integer(token.text)
-		if assign_int(v, i) {
-			return
+		fits_only := .Disallow_Integer_Wrap in flags
+		i, iok := parse_integer(token.text)
+		switch {
+		case iok:
+			if assign_int(v, i, fits_only) {
+				return
+			}
+			if assign_float(v, i) {
+				return
+			}
+		case fits_only:
+			// Beyond `i128`, so only a `u128` can hold it
+			if u, uok := strconv.parse_u128(token.text); uok && assign_int(v, u, fits_only) {
+				return
+			}
+		case:
+			if assign_int(v, i) {
+				return
+			}
 		}
-		if assign_float(v, i) {
-			return
+		if !iok {
+			// Beyond `i128`, so a float reads the text rather than the wrapped integer
+			if f, fok := strconv.parse_f64(token.text); fok && (p.spec != .JSON || is_finite(f)) && assign_float(v, f) {
+				return
+			}
 		}
 		return UNSUPPORTED_TYPE
 	case .Float:
 		advance_token(p)
 		f, _ := strconv.parse_f64(token.text)
+		if p.spec == .JSON && !is_finite(f) {
+			return UNSUPPORTED_TYPE
+		}
 		if assign_float(v, f) {
 			return
 		}
 		if i, fract := math.modf(f); fract == 0 && -(1 << 127) <= i && i < 1 << 127 {
-			if assign_int(v, i128(i)) {
+			if assign_int(v, i128(i), .Disallow_Integer_Wrap in flags) {
 				return
 			}
 			if assign_float(v, i) {
@@ -535,7 +604,7 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 	case .Ident:
 		advance_token(p)
 		if p.spec == .MJSON {
-			if unmarshal_string_token(p, any{v.data, ti.id}, token, ti) or_return {
+			if unmarshal_string_token(p, any{v.data, ti.id}, token, ti, flags) or_return {
 				return nil
 			}
 		} else if .Skip_Validation in flags {
@@ -549,7 +618,7 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 		if .Skip_Validation in flags && invalid {
 			return .Invalid_String
 		}
-		if unmarshal_string_token(p, any{v.data, ti.id}, token, ti) or_return {
+		if unmarshal_string_token(p, any{v.data, ti.id}, token, ti, flags) or_return {
 			return nil
 		}
 		return UNSUPPORTED_TYPE
@@ -681,6 +750,7 @@ unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind, flags: Unmar
 				return .Invalid_String
 			}
 			key_buf: [256]byte = ---
+			key_token := p.curr_token
 			key, key_allocated, key_err := parse_object_key_view(p, key_buf[:])
 			if key_err != nil {
 				return syntax_error(p, key_err, flags)
@@ -825,6 +895,14 @@ unmarshal_object :: proc(p: ^Parser, v: any, end_token: Token_Kind, flags: Unmar
 				}
 				continue struct_loop
 			} else {
+				if .Disallow_Unknown_Fields in flags {
+					return Unknown_Field_Error{
+						id    = v.id,
+						token = key_token,
+						field = clone_string(key, p.allocator) or_return,
+					}
+				}
+
 				// allows skipping unused struct fields
 				if skip_err := skip_value(p, .Skip_Validation in flags); skip_err != nil {
 					return syntax_error(p, skip_err, flags)
@@ -1085,24 +1163,24 @@ unmarshal_array :: proc(p: ^Parser, v: any, flags: Unmarshal_Flags) -> (err: Unm
 		return assign_array(p, rawptr(base_ptr), t.elem, length, flags)
 
 	case ^reflect.Type_Info_Array:
-		// NOTE(bill): Allow lengths which are less than the dst array
-		if int(length) > t.count {
+		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
+		if int(length) > t.count || .Disallow_Short_Arrays in flags && int(length) < t.count {
 			return UNSUPPORTED_TYPE
 		}
 
 		return assign_array(p, v.data, t.elem, length, flags)
 
 	case ^reflect.Type_Info_Enumerated_Array:
-		// NOTE(bill): Allow lengths which are less than the dst array
-		if int(length) > t.count {
+		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
+		if int(length) > t.count || .Disallow_Short_Arrays in flags && int(length) < t.count {
 			return UNSUPPORTED_TYPE
 		}
 
 		return assign_array(p, v.data, t.elem, length, flags)
 
 	case ^reflect.Type_Info_Complex:
-		// NOTE(bill): Allow lengths which are less than the dst array
-		if int(length) > 2 {
+		// NOTE(bill): Allow lengths which are less than the dst array, unless `.Disallow_Short_Arrays`
+		if int(length) > 2 || .Disallow_Short_Arrays in flags && int(length) < 2 {
 			return UNSUPPORTED_TYPE
 		}
 
