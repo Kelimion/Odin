@@ -348,8 +348,71 @@ assign_float :: proc(val: any, f: $T) -> bool {
 }
 
 
+@(private, require_results)
+hex_number_digits :: proc "contextless" (s: string) -> (digits: string, neg: bool) {
+	digits = s
+	if len(digits) > 0 && (digits[0] == '-' || digits[0] == '+') {
+		neg    = digits[0] == '-'
+		digits = digits[1:]
+	}
+	if len(digits) > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X') {
+		return digits[2:], neg
+	}
+	return "", neg
+}
+
+@(private, require_results)
+hex_digit_value :: proc "contextless" (c: byte) -> (value: u128, ok: bool) {
+	switch c {
+	case '0'..='9': return u128(c - '0'), true
+	case 'a'..='f': return u128(c - 'a' + 10), true
+	case 'A'..='F': return u128(c - 'A' + 10), true
+	}
+	return
+}
+
+@(private, require_results)
+parse_hex_integer :: proc "contextless" (digits: string, neg: bool) -> (value: i128, ok: bool) {
+	acc: u128
+	overflow := false
+	for c in transmute([]byte)digits {
+		d := hex_digit_value(c) or_return
+		overflow ||= acc > max(u128) >> 4
+		acc = acc << 4 | d
+	}
+	limit := u128(1) << 127
+	if neg {
+		return -i128(acc), !overflow && acc <= limit
+	}
+	return i128(acc), !overflow && acc < limit
+}
+
+@(private, require_results)
+parse_float :: proc(s: string) -> (value: f64, ok: bool) {
+	digits, neg := hex_number_digits(s)
+	if digits == "" {
+		return strconv.parse_f64(s)
+	}
+	acc: u128
+	shift := 0
+	for c in transmute([]byte)digits {
+		d := hex_digit_value(c) or_return
+		if acc <= max(u128) >> 4 {
+			acc = acc << 4 | d
+		} else {
+			shift += 4
+			acc |= u128(d != 0)
+		}
+	}
+	value = math.ldexp(f64(acc), shift)
+	return -value if neg else value, true
+}
+
 @(private)
 parse_integer :: proc(s: string) -> (value: i128, ok: bool) {
+	if digits, hex_neg := hex_number_digits(s); digits != "" {
+		return parse_hex_integer(digits, hex_neg)
+	}
 	neg    := len(s) > 1 && s[0] == '-'
 	digits := s[1:] if neg else s
 
@@ -609,14 +672,14 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info,
 		}
 		if !iok {
 			// Beyond `i128`, so a float reads the text rather than the wrapped integer
-			if f, fok := strconv.parse_f64(token.text); fok && (p.spec != .JSON || is_finite(f)) && assign_float(v, f) {
+			if f, fok := parse_float(token.text); fok && (p.spec != .JSON || is_finite(f)) && assign_float(v, f) {
 				return
 			}
 		}
 		return UNSUPPORTED_TYPE
 	case .Float:
 		advance_token(p)
-		f, _ := strconv.parse_f64(token.text)
+		f, _ := parse_float(token.text)
 		if p.spec == .JSON && !is_finite(f) {
 			return UNSUPPORTED_TYPE
 		}

@@ -527,3 +527,101 @@ review_json5_comments_and_spaces :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+review_json5_numbers :: proc(t: ^testing.T) {
+	for src in ([]string{`[.5]`, `[-.5]`, `[+.5]`, `[.5e1]`, `[.5E-1]`, `[-.5e+1]`, `[1,.5]`, `{"a":.5}`, `[+Infinity]`, `[+NaN]`, `[0X1f]`, `[+0x10]`, `[-0X10]`, `[0x1F,2]`}) {
+		expect_document(t, src, .JSON5, true)
+		expect_document(t, src, .SJSON, true)
+		expect_document(t, src, .JSON, false)
+	}
+	for src in ([]string{`[.]`, `[-.]`, `[+.]`, `[.e5]`, `[-.e5]`, `[0x]`, `[-0x]`, `[+0X]`, `[0xg]`, `[0x,1]`, `[++1]`, `[+-1]`, `[-+1]`, `[+Inf]`, `[+infinity]`}) {
+		for spec in SPECS {
+			expect_document(t, src, spec, false)
+		}
+	}
+
+	for src in ([]string{`[.5]`, `[-.5]`, `[+.5]`}) {
+		x: []f64
+		err := json.unmarshal_string(src, &x, .JSON, context.temp_allocator, {.Skip_Validation})
+		testing.expectf(t, err == json.Error.Unexpected_Token, "%q: %v, %v", src, x, err)
+	}
+
+	testing.expect(t, json.is_valid_number(".5", .JSON5))
+	testing.expect(t, json.is_valid_number("-.5e1", .JSON5))
+	testing.expect(t, !json.is_valid_number(".5", .JSON))
+	testing.expect(t, !json.is_valid_number(".", .JSON5))
+	testing.expect(t, !json.is_valid_number(".e1", .JSON5))
+	testing.expect(t, !json.is_valid_number("-.", .JSON5))
+
+	Hex :: struct {
+		src: string,
+		i:   i64,
+	}
+	for c in ([]Hex{{"0x1F", 31}, {"0X1f", 31}, {"0XF", 15}, {"-0x1", -1}, {"-0x10", -16}, {"+0x10", 16}, {"+0X0", 0}, {"0x7fffffffffffffff", max(i64)}, {"-0x8000000000000000", min(i64)}}) {
+		for spec in ([]json.Specification{.JSON5, .SJSON}) {
+			iv, ierr := json.parse_string(c.src, spec, true)
+			i, is_int := iv.(json.Integer)
+			testing.expectf(t, ierr == nil && is_int && i == c.i, "%v %q: %v, %v", spec, c.src, iv, ierr)
+			fv, ferr := json.parse_string(c.src, spec)
+			f, is_float := fv.(json.Float)
+			testing.expectf(t, ferr == nil && is_float && f == f64(c.i), "%v %q: %v, %v", spec, c.src, fv, ferr)
+		}
+	}
+
+	Hex_Float :: struct {
+		src: string,
+		f:   f64,
+	}
+	zeros_242 := strings.repeat("0", 242, context.temp_allocator)
+	zeros_256 := strings.repeat("0", 256, context.temp_allocator)
+	HEX_FLOATS := []Hex_Float{
+		{"0x20000000000001", 0h4340000000000000},
+		{"0x20000000000003", 0h4340000000000002},
+		{"-0x20000000000003", 0hc340000000000002},
+		{"0x100000000000000000000000000000000", 0h47f0000000000000},
+		{"0x1" + "0000000000000" + "8" + "00000000000000000" + "0", 0h47f0000000000000},
+		{"0x1" + "0000000000000" + "8" + "00000000000000000" + "1", 0h47f0000000000001},
+		{"0x1" + "0000000000000" + "8" + "00000000000000000" + "0" + "0000000001", 0h4a70000000000001},
+		{strings.concatenate({"0xFFFFFFFFFFFFF8", zeros_242}, context.temp_allocator), 0h7fefffffffffffff},
+		{strings.concatenate({"0x1", zeros_256}, context.temp_allocator), 0h7ff0000000000000},
+		{strings.concatenate({"-0x1", zeros_256}, context.temp_allocator), 0hfff0000000000000},
+	}
+	for c in HEX_FLOATS {
+		for spec in ([]json.Specification{.JSON5, .SJSON}) {
+			v, err := json.parse_string(c.src, spec)
+			f, is_float := v.(json.Float)
+			testing.expectf(t, err == nil && is_float && transmute(u64)f == transmute(u64)c.f, "%v %q: %v, %v", spec, c.src, v, err)
+		}
+	}
+
+	for spec in ([]json.Specification{.JSON5, .SJSON}) {
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			fs: []f64
+			err := json.unmarshal_string(`[-0x10, 0x1F, .5, +Infinity, +.5e1, 0X0, 0xe, 0xE1, -.5E-1, 1e+2]`, &fs, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && len(fs) == 10 && fs[0] == -16 && fs[1] == 31 && fs[2] == 0.5 && fs[3] == 0h7ff0000000000000 && fs[4] == 5 && fs[5] == 0 && fs[6] == 14 && fs[7] == 225 && fs[8] == -0.05 && fs[9] == 100, "%v %v: %v, %v", spec, flags, fs, err)
+
+			is: []i64
+			err = json.unmarshal_string(`[-0x10, 0x1F, +0x7fffffffffffffff, 0X0, +1, 0xabc, 0xe]`, &is, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && len(is) == 7 && is[0] == -16 && is[1] == 31 && is[2] == max(i64) && is[3] == 0 && is[4] == 1 && is[5] == 2748 && is[6] == 14, "%v %v: %v, %v", spec, flags, is, err)
+
+			wide: []i128
+			err = json.unmarshal_string(`[0x7fffffffffffffffffffffffffffffff, -0x80000000000000000000000000000000]`, &wide, spec, context.temp_allocator, flags)
+			testing.expectf(t, err == nil && len(wide) == 2 && wide[0] == max(i128) && wide[1] == min(i128), "%v %v: %v, %v", spec, flags, wide, err)
+		}
+
+		m: map[i128]int
+		err := json.unmarshal_string(`{"0x7fffffffffffffffffffffffffffffff": 1, "-0x80000000000000000000000000000000": 2, "0X1f": 3}`, &m, spec, context.temp_allocator)
+		testing.expectf(t, err == nil && len(m) == 3 && m[max(i128)] == 1 && m[min(i128)] == 2 && m[31] == 3, "%v: %v, %v", spec, m, err)
+		for src in ([]string{`{"0x80000000000000000000000000000000": 1}`, `{"-0x80000000000000000000000000000001": 1}`, `{"0x100000000000000000000000000000000": 1}`}) {
+			o: map[i128]int
+			err = json.unmarshal_string(src, &o, spec, context.temp_allocator)
+			testing.expectf(t, err != nil, "%v %q: %v, %v", spec, src, o, err)
+		}
+
+		floats: []f64
+		p := json.make_parser(`[0x1F, -0x10, 0x20000000000003]`, spec, false, context.temp_allocator)
+		err = json.unmarshal_value(&p, floats)
+		testing.expectf(t, err == nil && len(floats) == 3 && floats[0] == 31 && floats[1] == -16 && floats[2] == 0h4340000000000002, "%v: %v, %v", spec, floats, err)
+	}
+}

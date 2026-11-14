@@ -3,7 +3,6 @@ package encoding_json
 import "core:mem"
 import "core:unicode/utf8"
 import "core:unicode/utf16"
-import "core:strconv"
 
 Parser :: struct {
 	tok:            Tokenizer,
@@ -204,7 +203,7 @@ parse_value :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 		return
 	case .Float:
 		advance_token(p)
-		f, _ := strconv.parse_f64(token.text)
+		f, _ := parse_float(token.text)
 		value = Float(f)
 		return
 

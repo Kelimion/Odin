@@ -324,6 +324,9 @@ get_token_or_comment :: #force_inline proc(t: ^Tokenizer) -> (token: Token, err:
 			if c == '+' && t.spec == .JSON {
 				break scan
 			}
+			if t.spec != .JSON && data[start+1] == '0' && start+2 < len(data) && (data[start+2] == 'x' || data[start+2] == 'X') {
+				break scan
+			}
 			end, token.kind, err = scan_decimal(t, start)
 
 		case '0'..='9':
@@ -360,16 +363,32 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 			move_to(t, i)
 		}
 	}
-	skip_hex_digits :: proc(t: ^Tokenizer) {
-		for t.offset < len(t.data) {
-			next_rune(t)
+	skip_hex_digits :: proc(t: ^Tokenizer) -> (digits: int) {
+		for {
 			switch t.r {
 			case '0'..='9', 'a'..='f', 'A'..='F':
 				// Okay
+				next_rune(t)
+				digits += 1
 			case:
 				return
 			}
 		}
+	}
+	scan_leading_dot :: proc(t: ^Tokenizer, token: ^Token) -> Error {
+		skip_digits(t)
+		if t.r == 'e' || t.r == 'E' {
+			switch r := next_rune(t); r {
+			case '+', '-':
+				next_rune(t)
+			}
+			skip_digits(t)
+		}
+		token.kind = .Float
+		if !is_valid_number(string(t.data[token.offset:t.offset]), t.spec) {
+			return .Invalid_Number
+		}
+		return nil
 	}
 
 	skip_whitespace :: proc(t: ^Tokenizer, on_newline: bool) #no_bounds_check {
@@ -440,8 +459,8 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 		token.kind = ident_kind(t.data[token.offset:t.offset], t.spec)
 
 	case '+':
-		err = .Illegal_Character
 		if t.spec == .JSON {
+			err = .Illegal_Character
 			break
 		}
 		fallthrough
@@ -450,6 +469,14 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 		switch t.r {
 		case '0'..='9':
 			// Okay
+		case '.':
+			if t.spec != .JSON {
+				next_rune(t)
+				err = scan_leading_dot(t, &token)
+				break block
+			}
+			err = .Illegal_Character
+			break block
 		case:
 			// Illegal use of +/-
 			err = .Illegal_Character
@@ -458,9 +485,9 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 				if t.r == 'I' || t.r == 'N' {
 					skip_alphanum(t)
 				}
-				switch string(t.data[token.offset:t.offset]) {
-				case "-Infinity": token.kind, err = .Infinity, nil
-				case "-NaN":      token.kind, err = .NaN, nil
+				switch string(t.data[token.offset+1:t.offset]) {
+				case "Infinity": token.kind, err = .Infinity, nil
+				case "NaN":      token.kind, err = .NaN, nil
 				}
 			}
 			break block
@@ -470,9 +497,15 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 	case '0'..='9':
 		token.kind = t.parse_integers ? .Integer : .Float
 		if t.spec != .JSON { // Hexadecimal Numbers
-			if curr_rune == '0' && (t.r == 'x' || t.r == 'X') {
-				next_rune(t)
-				skip_hex_digits(t)
+			hex := token.offset
+			if curr_rune == '-' || curr_rune == '+' {
+				hex += 1
+			}
+			if hex+1 < len(t.data) && t.data[hex] == '0' && (t.data[hex+1] == 'x' || t.data[hex+1] == 'X') {
+				move_to(t, hex+2)
+				if skip_hex_digits(t) == 0 {
+					err = .Invalid_Number
+				}
 				break
 			}
 		}
@@ -487,18 +520,7 @@ get_other_token :: #force_no_inline proc(t: ^Tokenizer) -> (token: Token, err: E
 	case '.':
 		err = .Illegal_Character
 		if t.spec != .JSON { // Allow leading decimal point
-			skip_digits(t)
-			if t.r == 'e' || t.r == 'E' {
-				switch r := next_rune(t); r {
-				case '+', '-':
-					next_rune(t)
-				}
-				skip_digits(t)
-			}
-			str := string(t.data[token.offset:t.offset])
-			if !is_valid_number(str, t.spec) {
-				err = .Invalid_Number
-			}
+			err = scan_leading_dot(t, &token)
 		}
 
 
@@ -788,7 +810,9 @@ is_valid_number :: proc(str: string, spec: Specification) -> bool {
 		}
 	case '.':
 		if spec != .JSON { // Allow leading decimal point
-			s = s[1:]
+			if len(s) < 2 || s[1] < '0' || s[1] > '9' {
+				return false
+			}
 		} else {
 			return false
 		}
@@ -932,14 +956,19 @@ check_string_literal :: proc(str: string, spec: Specification) -> (valid, valid_
 
 @(private)
 count_validated_array :: proc(s: string, open: int, spec: Specification) -> (count: uintptr) #no_bounds_check {
-	rune_width :: #force_inline proc "contextless" (s: string, i: int) -> int {
-		if s[i] < utf8.RUNE_SELF {
-			return 1
+	number_end :: proc "contextless" (s: string, start: int, spec: Specification) -> int #no_bounds_check {
+		if spec != .JSON && start+1 < len(s) && s[start] == '0' && (s[start+1] == 'x' || s[start+1] == 'X') {
+			i := start + 2
+			for i < len(s) {
+				switch s[i] {
+				case '0'..='9', 'a'..='f', 'A'..='F':
+					i += 1
+					continue
+				}
+				break
+			}
+			return i
 		}
-		_, w := utf8.decode_rune_in_string(s[i:])
-		return w
-	}
-	number_end :: proc "contextless" (s: string, start: int) -> int #no_bounds_check {
 		i := digits_end(s, start)
 		if i < len(s) && s[i] == '.' {
 			i = digits_end(s, i+1)
@@ -984,30 +1013,12 @@ count_validated_array :: proc(s: string, open: int, spec: Specification) -> (cou
 			if i+1 < len(s) && (s[i+1] == 'I' || s[i+1] == 'N') {
 				i = alphanum_end(s, i+1)
 			} else {
-				i = number_end(s, i+1)
+				i = number_end(s, i+1, spec)
 			}
 
 		case '0'..='9':
 			count += uintptr(depth == 0)
-			is_hex := false
-			if c == '0' && spec != .JSON && i+1 < len(s) {
-				is_hex = s[i+1] == 'x' || s[i+1] == 'X'
-			}
-			if is_hex {
-				for i += 2; i < len(s); /**/ {
-					i += rune_width(s, i)
-					if i >= len(s) {
-						break
-					}
-					switch s[i] {
-					case '0'..='9', 'a'..='f', 'A'..='F':
-						continue
-					}
-					break
-				}
-			} else {
-				i = number_end(s, i+1)
-			}
+			i = number_end(s, i, spec)
 
 		case '/':
 			if i+1 < len(s) && s[i+1] == '*' {
