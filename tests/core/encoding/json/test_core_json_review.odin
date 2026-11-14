@@ -2,6 +2,7 @@ package test_core_json
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:io"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -338,6 +339,9 @@ review_strict_numbers_and_strings :: proc(t: ^testing.T) {
 
 	for spec in SPECS {
 		for src in ([]string{"", "[", "[1", "[1,", "[@]", `{"a":`}) {
+			if spec == .SJSON && src == "" {
+				continue
+			}
 			v, err := json.parse_string(src, spec)
 			testing.expectf(t, err == .Unexpected_Token && v == nil, "%v %q: %v, %v", spec, src, v, err)
 		}
@@ -1928,5 +1932,171 @@ review_marshal_crashes :: proc(t: ^testing.T) {
 		(^^Inner)(&pu)^ = ptr
 		data, err = json.marshal(pu, allocator = context.temp_allocator)
 		testing.expectf(t, err == json.Marshal_Data_Error.Unsupported_Type, "%v: %s %v", ptr, data, err)
+	}
+}
+
+@(test)
+review_marshal_keys :: proc(t: ^testing.T) {
+	KEYS :: []string{"\x01", "\a", "\v", "\x1b", "\x7f", "\xff", "\U000e0001", "a\"b", "\\", "\u2028"}
+	for key in KEYS {
+		value, verr := json.marshal(key, allocator = context.temp_allocator)
+		testing.expectf(t, verr == nil, "%q: %v", key, verr)
+		want := fmt.tprintf("{{%s:1}}", value)
+		for spec in ([]json.Specification{.JSON, .JSON5}) {
+			m := make(map[string]int, context.temp_allocator)
+			m[key] = 1
+			data, err := json.marshal(m, {spec = spec}, context.temp_allocator)
+			testing.expectf(t, err == nil && string(data) == want && json.is_valid(data, spec), "%v %q: %s %v", spec, key, data, err)
+
+			back: map[string]int
+			uerr := json.unmarshal(data, &back, spec, context.temp_allocator)
+			_, found := back[key if key != "\xff" else "\uFFFD"]
+			testing.expectf(t, uerr == nil && len(back) == 1 && found, "%v %q: %v %v", spec, key, back, uerr)
+
+			cm := make(map[cstring]int, context.temp_allocator)
+			cm[strings.clone_to_cstring(key, context.temp_allocator)] = 1
+			data, err = json.marshal(cm, {spec = spec}, context.temp_allocator)
+			testing.expectf(t, err == nil && string(data) == want, "%v %q cstring: %s %v", spec, key, data, err)
+		}
+
+		m := make(map[string]int, context.temp_allocator)
+		m[key] = 1
+		data, err := json.marshal(m, {spec = .MJSON, mjson_keys_use_quotes = true}, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == want[1:len(want)-1], "MJSON %q: %s %v", key, data, err)
+		data, err = json.marshal(m, {spec = .MJSON}, context.temp_allocator)
+		testing.expectf(t, err == json.Marshal_Data_Error.Key_Needs_Quotes, "MJSON bare %q: %s %v", key, data, err)
+
+		obj := make(json.Object, context.temp_allocator)
+		obj[key] = json.Integer(1)
+		text, perr := json.unparse(obj, allocator = context.temp_allocator)
+		testing.expectf(t, perr == nil && text == want, "unparse %q: %s %v", key, text, perr)
+		text, perr = json.unparse(obj, {spec = .MJSON}, context.temp_allocator)
+		testing.expectf(t, perr == json.Marshal_Data_Error.Key_Needs_Quotes, "unparse MJSON %q: %s %v", key, text, perr)
+	}
+
+	BARE    :: []string{"a", "_", "A_1", "_9", "nan", "inf", "True", "NULL"}
+	NOT_BARE :: []string{"", "1x", "9", "a b", "a-b", "a.b", "c:d", "a$", "\u00e9", "null", "true", "false", "NaN", "Infinity"}
+	for key in BARE {
+		m := make(map[string]int, context.temp_allocator)
+		m[key] = 1
+		data, err := json.marshal(m, {spec = .MJSON}, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == fmt.tprintf("%s:1", key), "%q: %s %v", key, data, err)
+		back: map[string]int
+		uerr := json.unmarshal(data, &back, .MJSON, context.temp_allocator)
+		testing.expectf(t, uerr == nil && len(back) == 1 && back[key] == 1, "%q: %v %v", key, back, uerr)
+	}
+	for key in NOT_BARE {
+		m := make(map[string]int, context.temp_allocator)
+		m[key] = 1
+		data, err := json.marshal(m, {spec = .MJSON}, context.temp_allocator)
+		testing.expectf(t, err == json.Marshal_Data_Error.Key_Needs_Quotes, "%q: %s %v", key, data, err)
+		data, err = json.marshal(m, {spec = .MJSON, mjson_keys_use_quotes = true}, context.temp_allocator)
+		back: map[string]int
+		uerr := json.unmarshal(data, &back, .MJSON, context.temp_allocator)
+		testing.expectf(t, err == nil && uerr == nil && len(back) == 1 && back[key] == 1, "%q quoted: %s %v %v %v", key, data, err, back, uerr)
+	}
+
+	im := make(map[i32]int, context.temp_allocator)
+	im[7] = 1
+	data, err := json.marshal(im, {spec = .MJSON}, context.temp_allocator)
+	testing.expectf(t, err == json.Marshal_Data_Error.Key_Needs_Quotes, "%s %v", data, err)
+	data, err = json.marshal(im, {spec = .MJSON, mjson_keys_use_quotes = true}, context.temp_allocator)
+	iback: map[i32]int
+	uerr := json.unmarshal(data, &iback, .MJSON, context.temp_allocator)
+	testing.expectf(t, err == nil && string(data) == `"7":1` && uerr == nil && iback[7] == 1, "%s %v %v %v", data, err, iback, uerr)
+
+	Nested :: struct {
+		m: map[string]int,
+	}
+	nested := Nested{m = make(map[string]int, context.temp_allocator)}
+	nested.m["x y"] = 1
+	data, err = json.marshal(nested, {spec = .MJSON, pretty = true}, context.temp_allocator)
+	testing.expectf(t, err == json.Marshal_Data_Error.Key_Needs_Quotes, "%s %v", data, err)
+
+	Failing_Writer :: struct {
+		calls:     int,
+		fail_call: int,
+	}
+	failing_writer_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+		fw := (^Failing_Writer)(stream_data)
+		#partial switch mode {
+		case .Write:
+			fw.calls += 1
+			if fw.calls - 1 == fw.fail_call {
+				return 0, .Short_Write
+			}
+			return i64(len(p)), nil
+		case .Query:
+			return io.query_utility({.Write, .Query})
+		}
+		return 0, .Unsupported
+	}
+	obj := make(json.Object, context.temp_allocator)
+	obj["key"] = json.Integer(1)
+	for spec in ([]json.Specification{.JSON, .MJSON}) {
+		opt := json.Marshal_Options{spec = spec, mjson_keys_use_quotes = true}
+		count := Failing_Writer{fail_call = -1}
+		perr := json.unparse_to_writer(io.Stream{failing_writer_proc, &count}, obj, opt)
+		testing.expectf(t, perr == nil && count.calls > 2, "%v: %v %d", spec, perr, count.calls)
+		for fail_call in 0..<count.calls {
+			fw := Failing_Writer{fail_call = fail_call}
+			perr = json.unparse_to_writer(io.Stream{failing_writer_proc, &fw}, obj, opt)
+			testing.expectf(t, perr == io.Error.Short_Write, "%v %d: %v", spec, fail_call, perr)
+		}
+	}
+}
+
+@(test)
+review_mjson_empty_root :: proc(t: ^testing.T) {
+	Empty :: struct {}
+	Unit :: struct {
+		name: string `json:",omitempty"`,
+	}
+	m: map[string]int
+	for pretty in ([]bool{false, true}) {
+		for v in ([]any{m, Empty{}, Unit{}}) {
+			data, err := json.marshal(v, {spec = .MJSON, pretty = pretty}, context.temp_allocator)
+			testing.expectf(t, err == nil && string(data) == "{}", "%v %v: %q %v", pretty, v.id, data, err)
+		}
+		text, perr := json.unparse(json.Object{}, {spec = .MJSON, pretty = pretty}, context.temp_allocator)
+		testing.expectf(t, perr == nil && text == "{}", "%v: %q %v", pretty, text, perr)
+	}
+	data, err := json.marshal(Unit{name = "x"}, {spec = .MJSON}, context.temp_allocator)
+	testing.expectf(t, err == nil && string(data) == `name:"x"`, "%q %v", data, err)
+	nested := [1]map[string]int{}
+	data, err = json.marshal(nested, {spec = .MJSON}, context.temp_allocator)
+	testing.expectf(t, err == nil && string(data) == "[{}]", "%q %v", data, err)
+
+	for src in ([]string{"", "  \n", "// c\n", "/* c */", "{}", "{ }"}) {
+		testing.expectf(t, json.is_valid(transmute([]byte)src, .MJSON), "%q", src)
+		v, verr := json.parse_string(src, .MJSON, allocator = context.temp_allocator)
+		obj, is_obj := v.(json.Object)
+		testing.expectf(t, verr == nil && is_obj && len(obj) == 0, "%q: %v %v", src, v, verr)
+		for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+			u := Unit{name = "keep"}
+			uerr := json.unmarshal_string(src, &u, .MJSON, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil && u.name == "keep", "%q %v: %v %v", src, flags, u, uerr)
+			um: map[string]int
+			uerr = json.unmarshal_string(src, &um, .MJSON, context.temp_allocator, flags)
+			testing.expectf(t, uerr == nil && len(um) == 0, "%q %v: %v %v", src, flags, um, uerr)
+			uv: json.Value
+			uerr = json.unmarshal_string(src, &uv, .MJSON, context.temp_allocator, flags)
+			uobj, uis_obj := uv.(json.Object)
+			testing.expectf(t, uerr == nil && uis_obj && len(uobj) == 0, "%q %v: %v %v", src, flags, uv, uerr)
+		}
+	}
+	for src in ([]string{"/* c", "/"}) {
+		testing.expectf(t, !json.is_valid(transmute([]byte)src, .MJSON), "%q", src)
+		_, verr := json.parse_string(src, .MJSON, allocator = context.temp_allocator)
+		testing.expectf(t, verr != nil, "%q", src)
+		u: Unit
+		uerr := json.unmarshal_string(src, &u, .MJSON, context.temp_allocator)
+		testing.expectf(t, uerr != nil, "%q", src)
+	}
+	for spec in ([]json.Specification{.JSON, .JSON5}) {
+		testing.expectf(t, !json.is_valid(nil, spec), "%v", spec)
+		u: Unit
+		uerr := json.unmarshal_string("", &u, spec, context.temp_allocator)
+		testing.expectf(t, uerr != nil, "%v: %v", spec, uerr)
 	}
 }

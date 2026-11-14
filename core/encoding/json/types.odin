@@ -27,7 +27,8 @@ Using one of these `Specification`s.
 		https://bitsquid.blogspot.com/2009/10/simplified-json-notation.html
 
 		* All the same features as JSON5 plus extras.
-		* Assume an object definition at the root level (no need to surround entire file with { } ).
+		* Assume an object definition at the root level (no need to surround entire file with { } );
+		  an empty document is an empty object.
 		* Commas are optional; a line break after a value acts as one, so no line may start with a comma.
 		* Quotes around object keys are optional if the keys are valid identifiers.
 		* : can be replaced with =

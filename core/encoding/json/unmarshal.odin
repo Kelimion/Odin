@@ -191,7 +191,7 @@ unmarshal_any :: proc(data: []byte, v: any, spec := DEFAULT_SPECIFICATION, alloc
 	context.allocator = p.allocator
 
 	err: Unmarshal_Error
-	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
+	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String || p.curr_token.kind == .EOF) {
 		err = unmarshal_implicit_root(&p, data)
 	} else {
 		err = unmarshal_value(&p, data)

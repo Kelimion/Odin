@@ -61,7 +61,7 @@ parse_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers
 
 	value: Value
 	err:   Error
-	if p.spec == .SJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
+	if p.spec == .SJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String || p.curr_token.kind == .EOF) {
 		obj: Object
 		obj, err = parse_object_body(&p, .EOF, loc)
 		if err == nil {

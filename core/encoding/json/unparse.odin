@@ -74,7 +74,7 @@ _unparse_to_writer :: proc(w: io.Writer, value: Value, opt: ^Marshal_Options) ->
 			opt_write_start(w, opt, '{') or_return
 			for first_iteration := true; key, val in v {
 				opt_write_iteration(w, opt, first_iteration) or_return
-				opt_write_key      (w, opt, key)             or_return
+				unparse_write_key  (w, opt, key)             or_return
 				_unparse_to_writer (w, val, opt)             or_return
 				first_iteration = false
 			}
@@ -95,12 +95,21 @@ _unparse_to_writer :: proc(w: io.Writer, value: Value, opt: ^Marshal_Options) ->
 			opt_write_start(w, opt, '{') or_return
 			for e, i in entries {
 				opt_write_iteration(w, opt, i == 0)  or_return
-				opt_write_key      (w, opt, e.key)   or_return
+				unparse_write_key  (w, opt, e.key)   or_return
 				_unparse_to_writer (w, e.value, opt) or_return
 			}
 			opt_write_end(w, opt, '}') or_return
 		}
 		return nil
+	}
+	return nil
+}
+
+@(private)
+unparse_write_key :: proc(w: io.Writer, opt: ^Marshal_Options, key: string) -> Unparse_Error {
+	switch err in opt_write_key(w, opt, key) {
+	case Marshal_Data_Error: return err
+	case io.Error:           return err
 	}
 	return nil
 }

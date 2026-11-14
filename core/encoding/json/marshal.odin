@@ -17,6 +17,7 @@ Marshal_Data_Error :: enum {
 	None,
 	Unsupported_Type,
 	Non_Finite_Float, // Infinity or NaN, which only JSON5 and MJSON can represent
+	Key_Needs_Quotes,
 }
 
 Marshal_Error :: union #shared_nil {
@@ -24,7 +25,6 @@ Marshal_Error :: union #shared_nil {
 	io.Error,
 }
 
-// careful with MJSON maps & non quotes usage as keys with whitespace will lead to bad results
 Marshal_Options :: struct {
 	// output based on spec
 	spec: Specification,
@@ -41,10 +41,8 @@ Marshal_Options :: struct {
 	// Output uint as hex in JSON5 & MJSON
 	write_uint_as_hex: bool,
 
-	// If spec is MJSON and this is true, then keys will be quoted.
-	//
-	// WARNING: If your keys contain whitespace and this is false, then the
-	// output will be bad.
+	// Otherwise each key must be a bare identifier, `[A-Za-z_][A-Za-z0-9_]*` other than
+	// `null`, `true`, `false`, `NaN` and `Infinity`, or marshal returns `.Key_Needs_Quotes`.
 	mjson_keys_use_quotes: bool,
 
 	// If spec is MJSON and this is true, then use '=' as delimiter between
@@ -69,6 +67,7 @@ Marshal_Options :: struct {
 	indentation: int,
 	mjson_skipped_first_braces_start: bool,
 	mjson_skipped_first_braces_end: bool,
+	mjson_root_has_entries: bool,
 }
 
 User_Marshaler :: #type proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> Marshal_Error
@@ -154,7 +153,7 @@ marshal :: proc(v: any, opt: Marshal_Options = {}, allocator := context.allocato
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD(ignore = allocator == context.temp_allocator)
 
 	marshal_to_builder(&b, v, opt) or_return
-	
+
 	if len(b.buf) != 0 {
 		data = b.buf[:]
 	}
@@ -713,7 +712,7 @@ write_quoted_json_string :: proc(w: io.Writer, str: string) -> io.Error {
 	//       The unmarshaler is permissive and would also accept single quotes (`'`).
 	quote :: '"'
 	io.write_byte(w, quote) or_return
-	
+
 	for width, s := 0, str; len(s) > 0; s = s[width:] {
 		r := rune(s[0])
 		width = 1
@@ -770,7 +769,7 @@ write_json_escaped_rune :: proc(w: io.Writer, r: rune) -> io.Error {
 		io.write_byte(w, byte(r)) or_return
 		return nil
 	}
-	
+
 	if utf8.is_printable(r) {
 		io.write_encoded_and_escaped_rune(w, r, quote = 0) or_return
 		return nil
@@ -838,17 +837,19 @@ opt_write_comment :: proc(w: io.Writer, opt: ^Marshal_Options, comment: ^string)
 
 // write key as quoted string or with optional quotes in mjson
 @(private)
-opt_write_key :: proc(w: io.Writer, opt: ^Marshal_Options, name: string) -> (err: io.Error)  {
+opt_write_key :: proc(w: io.Writer, opt: ^Marshal_Options, name: string) -> (err: Marshal_Error)  {
 	switch opt.spec {
 	case .JSON, .JSON5:
-		io.write_quoted_string(w, name) or_return
+		write_quoted_json_string(w, name) or_return
 		io.write_string(w, ": " if opt.pretty else ":") or_return
 
 	case .MJSON:
 		if opt.mjson_keys_use_quotes {
-			io.write_quoted_string(w, name) or_return
-		} else {
+			write_quoted_json_string(w, name) or_return
+		} else if is_bare_mjson_key(name) {
 			io.write_string(w, name) or_return
+		} else {
+			return .Key_Needs_Quotes
 		}
 
 		if opt.mjson_keys_use_equal_sign {
@@ -859,6 +860,26 @@ opt_write_key :: proc(w: io.Writer, opt: ^Marshal_Options, name: string) -> (err
 	}
 
 	return
+}
+
+@(private)
+is_bare_mjson_key :: proc(name: string) -> bool {
+	switch name {
+	case "", "null", "false", "true", "NaN", "Infinity":
+		return false
+	}
+	for c, i in transmute([]byte)name {
+		switch c {
+		case 'A'..='Z', 'a'..='z', '_':
+		case '0'..='9':
+			if i == 0 {
+				return false
+			}
+		case:
+			return false
+		}
+	}
+	return true
 }
 
 // insert start byte and increase indentation on pretty
@@ -897,6 +918,9 @@ opt_write_iteration :: proc(w: io.Writer, opt: ^Marshal_Options, first_iteration
 		opt_write_indentation(w, opt) or_return
 
 	case .MJSON:
+		if opt.indentation == 0 {
+			opt.mjson_root_has_entries = true
+		}
 		if !first_iteration {
 			// on pretty no commas necessary
 			if opt.pretty {
@@ -918,6 +942,9 @@ opt_write_iteration :: proc(w: io.Writer, opt: ^Marshal_Options, first_iteration
 opt_write_end :: proc(w: io.Writer, opt: ^Marshal_Options, c: byte) -> (err: io.Error)  {
 	if opt.spec == .MJSON && opt.mjson_skipped_first_braces_start && !opt.mjson_skipped_first_braces_end && opt.indentation == 0 && c == '}' {
 		opt.mjson_skipped_first_braces_end = true
+		if !opt.mjson_root_has_entries {
+			io.write_string(w, "{}") or_return
+		}
 		return
 	}
 

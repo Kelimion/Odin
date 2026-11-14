@@ -12,7 +12,7 @@ is_valid :: proc(data: []byte, spec := DEFAULT_SPECIFICATION, parse_integers := 
 @(private, require_results)
 validate_document :: proc(p: ^Parser) -> bool {
 	valid: bool
-	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String) {
+	if p.spec == .MJSON && (p.curr_token.kind == .Ident || p.curr_token.kind == .String || p.curr_token.kind == .EOF) {
 		valid = validate_object_body(p, .EOF)
 	} else {
 		valid = validate_value(p)
