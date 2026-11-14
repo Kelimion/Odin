@@ -61,6 +61,10 @@ Marshal_Options :: struct {
 	// NOTE: If a name isn't found it'll use the underlying value.
 	use_enum_names: bool,
 
+	// Output `null` for an infinity or NaN, as JavaScript's `JSON.stringify` does,
+	// rather than returning `.Non_Finite_Float` in JSON or writing `Infinity` or `NaN` in JSON5 and MJSON.
+	non_finite_as_null: bool,
+
 	// Internal state
 	indentation: int,
 	mjson_skipped_first_braces_start: bool,
@@ -263,7 +267,7 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 		io.write_string(w, val ? "true" : "false") or_return
 
 	case ^runtime.Type_Info_Any:
-		return .Unsupported_Type
+		return _marshal_to_writer(w, (^any)(v.data)^, opt)
 
 	case ^runtime.Type_Info_Type_Id:
 		return .Unsupported_Type
@@ -645,13 +649,16 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 @(private)
 write_float :: proc(w: io.Writer, f: f64, bit_size: int, opt: ^Marshal_Options) -> Marshal_Error {
 	buf: [64]byte
-	io.write_string(w, format_float(buf[:], f, bit_size, opt.spec) or_return) or_return
+	io.write_string(w, format_float(buf[:], f, bit_size, opt.spec, opt.non_finite_as_null) or_return) or_return
 	return nil
 }
 
 @(private)
-format_float :: proc(buf: []byte, f: f64, bit_size: int, spec: Specification) -> (string, Marshal_Data_Error) {
+format_float :: proc(buf: []byte, f: f64, bit_size: int, spec: Specification, non_finite_as_null := false) -> (string, Marshal_Data_Error) {
 	if math.is_nan(f) || math.is_inf(f) {
+		if non_finite_as_null {
+			return "null", nil
+		}
 		if spec == .JSON {
 			return "", .Non_Finite_Float
 		}

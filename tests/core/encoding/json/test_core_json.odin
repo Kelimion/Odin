@@ -1282,3 +1282,143 @@ strict_json :: proc(t: ^testing.T) {
 	delete(n.name)
 	delete(n.list)
 }
+
+@(test)
+unmarshal_values_that_do_not_fit :: proc(t: ^testing.T) {
+	Mode :: enum u8 { Off, On }
+	Values :: struct {
+		mode:  Mode,
+		small: u8,
+		large: u32,
+		f:     f64,
+	}
+
+	// Each used to be stored changed or not at all: an unknown name left the enum as it was,
+	// and JSON read an overflow or a quoted "nan" as a non-finite float.
+	// `.Disallow_Integer_Wrap` refuses an integer that would wrap.
+	Case :: struct {
+		src:   string,
+		field: string,
+		flags: json.Unmarshal_Flags,
+	}
+	for c in ([]Case{
+		{`{"mode": "Sideways"}`, "mode",  {}},
+		{`{"f": 1e999}`,         "f",     {}},
+		{`{"f": -1e999}`,        "f",     {}},
+		{`{"f": "nan"}`,         "f",     {}},
+		{`{"f": "inf"}`,         "f",     {}},
+		{`{"small": 300}`,       "small", {.Disallow_Integer_Wrap}},
+		{`{"small": -1}`,        "small", {.Disallow_Integer_Wrap}},
+		{`{"large": -1}`,        "large", {.Disallow_Integer_Wrap}},
+		{`{"small": "256"}`,     "small", {.Disallow_Integer_Wrap}},
+		{`{"small": 2.0e3}`,     "small", {.Disallow_Integer_Wrap}},
+		{`{"large": 1000000000000000000000000000000000000000000}`, "large", {.Disallow_Integer_Wrap}},
+	}) {
+		v: Values
+		err := json.unmarshal_string(c.src, &v, .JSON, flags = c.flags)
+		e, is_type := err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && e.field == c.field, "%s: expected an Unsupported_Type_Error for %q, got %v", c.src, c.field, err)
+		if is_type {
+			delete(e.field)
+		}
+	}
+
+	v: Values
+	testing.expect_value(t, json.unmarshal_string(`{"mode": "On", "small": 255, "large": 4294967295, "f": 1e308}`, &v, .JSON, flags = {.Disallow_Integer_Wrap}), nil)
+	testing.expect_value(t, v, Values{mode = .On, small = 255, large = 4294967295, f = 1e308})
+
+	// Without the flag, an integer still wraps as a conversion would.
+	testing.expect_value(t, json.unmarshal_string(`{"small": 300}`, &v, .JSON), nil)
+	testing.expect_value(t, v.small, 44)
+
+	// The largest `u128` is beyond `i128`, and still fits with the flag.
+	big: u128
+	testing.expect_value(t, json.unmarshal_string(`340282366920938463463374607431768211455`, &big, .JSON, flags = {.Disallow_Integer_Wrap}), nil)
+	testing.expect_value(t, big, max(u128))
+
+	// An integer beyond `i128` still reads into a float.
+	testing.expect_value(t, json.unmarshal_string(`{"f": 1000000000000000000000000000000000000000000}`, &v, .JSON), nil)
+	testing.expect_value(t, v.f, 1e42)
+
+	// JSON5 and MJSON can represent non-finite floats.
+	testing.expect_value(t, json.unmarshal_string(`{"f": "inf"}`, &v, .JSON5), nil)
+	testing.expect(t, math.is_inf(v.f))
+}
+
+@(test)
+unmarshal_strict_flags :: proc(t: ^testing.T) {
+	Args :: struct {
+		id:  int,
+		pos: [2]f64,
+		z:   complex64,
+	}
+	strict := json.Unmarshal_Flags{.Disallow_Unknown_Fields, .Disallow_Short_Arrays}
+
+	// Without the flags, an unknown key is skipped and a short array fills its start.
+	v: Args
+	testing.expect_value(t, json.unmarshal_string(`{"id": 1, "extra": true, "pos": [1]}`, &v), nil)
+	testing.expect_value(t, v, Args{id = 1, pos = {1, 0}})
+
+	err := json.unmarshal_string(`{"id": 1, "extra": true}`, &v, flags = strict)
+	unknown, is_unknown := err.(json.Unknown_Field_Error)
+	testing.expectf(t, is_unknown && unknown.field == "extra" && unknown.id == Args, "expected an Unknown_Field_Error for \"extra\", got %v", err)
+	if is_unknown {
+		delete(unknown.field)
+	}
+
+	for src in ([]string{`{"pos": [1]}`, `{"z": [1]}`}) {
+		err = json.unmarshal_string(src, &v, flags = strict)
+		e, is_type := err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type, "%s: expected an Unsupported_Type_Error, got %v", src, err)
+		if is_type {
+			delete(e.field)
+		}
+	}
+
+	v = {}
+	testing.expect_value(t, json.unmarshal_string(`{"id": 2, "pos": [3, 4], "z": [1, 2]}`, &v, flags = strict), nil)
+	testing.expect_value(t, v, Args{id = 2, pos = {3, 4}, z = complex(1, 2)})
+
+	// A union tries each variant in turn, and an unknown key rules out a struct variant.
+	A :: struct { a: int }
+	B :: struct { b: int }
+	U :: union { A, B }
+	u: U
+	testing.expect_value(t, json.unmarshal_string(`{"b": 5}`, &u, flags = strict), nil)
+	testing.expect_value(t, u, U(B{b = 5}))
+}
+
+@(test)
+marshal_non_finite_as_null :: proc(t: ^testing.T) {
+	values := []f64{1.5, math.inf_f64(1), math.inf_f64(-1), math.nan_f64()}
+	for spec in ([]json.Specification{.JSON, .JSON5, .MJSON}) {
+		data, err := json.marshal(values, {spec = spec, non_finite_as_null = true}, context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == "[1.5,null,null,null]", "%v: expected [1.5,null,null,null], got %s (%v)", spec, string(data), err)
+	}
+
+	text, err := json.unparse(json.Float(math.nan_f64()), {non_finite_as_null = true}, context.temp_allocator)
+	testing.expect_value(t, text, "null")
+	testing.expect_value(t, err, nil)
+
+	free_all(context.temp_allocator)
+}
+
+@(test)
+marshal_any :: proc(t: ^testing.T) {
+	Setting :: struct {
+		name:  string,
+		value: any,
+	}
+	Mode :: enum { Off, On }
+
+	n    := 1.5
+	mode := Mode.On
+	pair := [2]f64{0, 2}
+	settings := []Setting{{"n", n}, {"mode", mode}, {"pair", pair}, {"none", nil}}
+
+	data, err := json.marshal(settings, {use_enum_names = true}, context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, string(data), `[{"name":"n","value":1.5},{"name":"mode","value":"On"},{"name":"pair","value":[0.0,2.0]},{"name":"none","value":null}]`)
+
+	free_all(context.temp_allocator)
+}
