@@ -498,7 +498,11 @@ review_unvalidated_key_with_tab :: proc(t: ^testing.T) {
 		m: map[string]int
 		p := json.make_parser(transmute([]byte)string("{\"a\tb\":5}"), spec, true, context.temp_allocator)
 		err := json.unmarshal_value(&p, m)
-		testing.expectf(t, err == nil && len(m) == 1, "%v: %v, %v", spec, m, err)
+		if spec == .JSON {
+			testing.expectf(t, err == json.Error.Invalid_String && len(m) == 0, "%v: %v, %v", spec, m, err)
+		} else {
+			testing.expectf(t, err == nil && len(m) == 1, "%v: %v, %v", spec, m, err)
+		}
 	}
 }
 
@@ -975,4 +979,179 @@ review_match_ignore_key_not_found :: proc(t: ^testing.T) {
 	found, merr = json.match(v, "c", 0, flags = {.Ignore_Key_Not_Found})
 	c, _ := found.(json.Float)
 	testing.expectf(t, merr == .None && c == 2, "%v %v", found, merr)
+}
+
+@(test)
+review_unmarshal_value_unvalidated :: proc(t: ^testing.T) {
+	S :: struct {
+		a: int,
+		b: []int,
+	}
+	SOURCES :: [?]string{
+		`{"a" 1}`,
+		`{"a": 1`,
+		`{"a": 1 "b": [2]}`,
+		`{"b": [1, 2`,
+		`{"b": [1 2]}`,
+		`{"b": [1, 2}`,
+		`{"b": [1,, 2]}`,
+		`{"a": 1e}`,
+		`{"a": 01}`,
+		`{"a":}`,
+		`{"a": 1,`,
+		`{,}`,
+		`{"c": {"d" 1}}`,
+		`{"c": [1e]}`,
+		`{"c": "x\q"}`,
+		`{"a": 1, "b": [2, 3]}`,
+	}
+	for src in SOURCES {
+		for spec in SPECS {
+			s, s_skip: S
+			p := json.make_parser(transmute([]byte)src, spec, true, context.temp_allocator)
+			err := json.unmarshal_value(&p, s)
+			err_skip := json.unmarshal_string(src, &s_skip, spec, context.temp_allocator, {.Skip_Validation})
+			e, _ := err.(json.Error)
+			e_skip, _ := err_skip.(json.Error)
+			testing.expectf(t, (err == nil) == (err_skip == nil) && e == e_skip, "%v %q: %v, skip validation %v", spec, src, err, err_skip)
+
+			m: map[string]int
+			p = json.make_parser(transmute([]byte)src, spec, true, context.temp_allocator)
+			err = json.unmarshal_value(&p, m)
+			testing.expectf(t, err != nil || src == `{"a": 1, "b": [2, 3]}`, "%v %q: %v", spec, src, err)
+		}
+	}
+
+	for spec in SPECS {
+		m: map[string]int
+		p := json.make_parser(transmute([]byte)string(`{"a" 1}`), spec, true, context.temp_allocator)
+		err := json.unmarshal_value(&p, m)
+		testing.expectf(t, err == json.Error.Expected_Colon_After_Key, "%v: %v", spec, err)
+
+		a: [dynamic]int
+		p = json.make_parser(transmute([]byte)string(`[1, 2`), spec, true, context.temp_allocator)
+		err = json.unmarshal_value(&p, a)
+		testing.expectf(t, err == json.Error.EOF, "%v: %v", spec, err)
+	}
+}
+
+@(test)
+review_unmarshal_nil_pointer :: proc(t: ^testing.T) {
+	p: ^int
+	err := json.unmarshal_string("1", p)
+	testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Parameter, "%v", err)
+	err = json.unmarshal_string("[", p)
+	testing.expectf(t, err == json.Unmarshal_Data_Error.Invalid_Parameter, "%v", err)
+}
+
+@(test)
+review_unmarshal_bit_set_128 :: proc(t: ^testing.T) {
+	S :: struct {
+		flags:    bit_set[0..<128],
+		flags_be: bit_set[0..<128; u128be],
+		flags_le: bit_set[0..<128; u128le],
+	}
+	s: S
+	err := json.unmarshal_string(`{"flags": 5, "flags_be": 5, "flags_le": 5}`, &s)
+	testing.expectf(t, err == nil && s.flags == {0, 2} && s.flags_be == {0, 2} && s.flags_le == {0, 2}, "%v %v", s, err)
+	err = json.unmarshal_string(`{"flags": -170141183460469231731687303715884105728}`, &s)
+	testing.expectf(t, err == nil && s.flags == {127}, "%v %v", s, err)
+}
+
+@(test)
+review_unmarshal_string16_map_keys :: proc(t: ^testing.T) {
+	m16: map[string16]int
+	err := json.unmarshal_string(`{"a": 1}`, &m16)
+	_, unsupported := err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && len(m16) == 0, "%v %v", m16, err)
+
+	mc16: map[cstring16]int
+	err = json.unmarshal_string(`{"a": 1}`, &mc16)
+	_, unsupported = err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && len(mc16) == 0, "%v %v", mc16, err)
+}
+
+@(test)
+review_unmarshal_array_size_overflow :: proc(t: ^testing.T) {
+	N :: 1 << 20 when size_of(int) == 8 else 1 << 10
+	Big :: [N][N][N]u8
+	SRC :: `[[[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]], [[[1]]]]`
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		s: []Big
+		err := json.unmarshal_string(SRC, &s, flags = flags)
+		testing.expectf(t, err == json.Error.Out_Of_Memory && s == nil, "%v: %v", flags, err)
+
+		d: [dynamic]Big
+		err = json.unmarshal_string(SRC, &d, flags = flags)
+		testing.expectf(t, err == json.Error.Out_Of_Memory && d == nil, "%v: %v", flags, err)
+	}
+}
+
+@(test)
+review_unmarshal_field_error_empty_key :: proc(t: ^testing.T) {
+	Inner :: struct {
+		a: int `json:""`,
+	}
+	Outer :: struct {
+		i: Inner `json:""`,
+	}
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		o: Outer
+		err := json.unmarshal_string(`{"": {"": "x"}}`, &o, flags = flags)
+		e, is_type := err.(json.Unsupported_Type_Error)
+		testing.expectf(t, is_type && e.field == "" && e.id == typeid_of(int), "%v: %v", flags, err)
+		delete(e.field)
+
+		ok: Outer
+		err = json.unmarshal_string(`{"": {"": 5}}`, &ok, flags = flags)
+		testing.expectf(t, err == nil && ok.i.a == 5, "%v: %v %v", flags, ok, err)
+	}
+}
+
+@(test)
+review_unmarshal_unvalidated_errors :: proc(t: ^testing.T) {
+	S :: struct {
+		a: int,
+	}
+	Case :: struct {
+		src:  string,
+		want: json.Error,
+	}
+	SCALAR_CASES :: [?]Case{
+		{`{"a": }`,   .Unexpected_Token},
+		{`{"a": ]}`,  .Unexpected_Token},
+		{`{"a": :}`,  .Unexpected_Token},
+		{`{"a": ,}`,  .Unexpected_Token},
+	}
+	for c in SCALAR_CASES {
+		for spec in SPECS {
+			s, s_skip: S
+			p := json.make_parser(transmute([]byte)c.src, spec, true, context.temp_allocator)
+			err := json.unmarshal_value(&p, s)
+			testing.expectf(t, err == c.want, "%v %q: %v", spec, c.src, err)
+			err = json.unmarshal_string(c.src, &s_skip, spec, context.temp_allocator, {.Skip_Validation})
+			testing.expectf(t, err == c.want, "%v %q: skip validation %v", spec, c.src, err)
+		}
+	}
+
+	m: map[string]int
+	err := json.unmarshal_string(`{1: 2}`, &m, .JSON, context.temp_allocator, {.Skip_Validation})
+	testing.expectf(t, err == json.Error.Expected_String_For_Object_Key && len(m) == 0, "%v %v", m, err)
+
+	e: [enum{A, B}]int
+	err = json.unmarshal_string(`{1: 2}`, &e, .JSON, context.temp_allocator, {.Skip_Validation})
+	testing.expectf(t, err == json.Error.Expected_String_For_Object_Key, "%v %v", e, err)
+
+	for flags in ([]json.Unmarshal_Flags{{}, {.Skip_Validation}}) {
+		for n in 0..<32 {
+			f := Failing_Allocator{backing = context.temp_allocator, left = n}
+			ab: map[string]int
+			ab_err := json.unmarshal_string(`{"a": 1, "b": 2}`, &ab, .JSON, failing_allocator(&f), flags)
+			if ab_err == nil {
+				testing.expectf(t, len(ab) == 2 && ab["a"] == 1 && ab["b"] == 2, "%v with %d allocations: %v", flags, n, ab)
+				break
+			}
+			testing.expectf(t, ab_err == json.Error.Out_Of_Memory, "%v with %d allocations: %v", flags, n, ab_err)
+		}
+	}
 }
