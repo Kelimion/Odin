@@ -4,6 +4,12 @@ import "core:mem"
 import "core:unicode/utf8"
 import "core:unicode/utf16"
 
+Union_Attempt :: enum u8 {
+	None,
+	Strict,
+	Lenient,
+}
+
 Parser :: struct {
 	tok:            Tokenizer,
 	prev_token:     Token,
@@ -13,6 +19,7 @@ Parser :: struct {
 	allocator:      mem.Allocator,
 	parse_integers: bool,
 	depth:          int,
+	union_attempt:  Union_Attempt,
 }
 
 make_parser :: proc{

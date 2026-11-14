@@ -598,27 +598,126 @@ unmarshal_value :: proc(p: ^Parser, v: any, flags := Unmarshal_Flags{}) -> (err:
 @(private)
 unmarshal_union :: proc(p: ^Parser, v: any, u: ^reflect.Type_Info_Union, flags: Unmarshal_Flags) -> (err: Unmarshal_Error) {
 	UNSUPPORTED_TYPE := Unsupported_Type_Error{id = v.id, token = p.curr_token}
-	for variant, i in u.variants {
-		variant_any := any{v.data, variant.id}
-		variant_p := p^
-		if err = unmarshal_value(&variant_p, variant_any, flags); err == nil {
-			p^ = variant_p
+	size := type_info_of(v.id).size
 
-			raw_tag := i
-			if !u.no_nil { raw_tag += 1 }
-			tag := any{rawptr(uintptr(v.data) + u.tag_offset), u.tag_type.id}
-			assign_int(tag, raw_tag)
-			return
+	if p.union_attempt != .None {
+		for variant, i in u.variants {
+			mem.zero(v.data, size)
+			variant_p := p^
+			if err = unmarshal_value(&variant_p, any{v.data, variant.id}, flags); err == nil {
+				p^ = variant_p
+				unmarshal_union_tag(v, u, i)
+				return
+			}
+			if err == Error.Max_Depth_Exceeded || err == Error.Out_Of_Memory {
+				return
+			}
+			#partial switch e in err {
+			case Unsupported_Type_Error: delete(e.field, p.allocator)
+			case Unknown_Field_Error:    delete(e.field, p.allocator)
+			}
 		}
-		if err == Error.Max_Depth_Exceeded {
-			return
-		}
-		#partial switch e in err {
-		case Unsupported_Type_Error: delete(e.field, p.allocator)
-		case Unknown_Field_Error:    delete(e.field, p.allocator)
+		mem.zero(v.data, size)
+		return UNSUPPORTED_TYPE
+	}
+
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, p.allocator, p.allocator, 4096, 1024)
+	defer mem.dynamic_arena_destroy(&arena)
+
+	for attempt in ([]Union_Attempt{.Strict, .Lenient}) {
+		for variant, i in u.variants {
+			mem.zero(v.data, size)
+			direct := !unmarshal_may_allocate(variant.id)
+			if direct {
+				variant_p := p^
+				if attempt == .Strict {
+					variant_p.union_attempt = .Strict
+				}
+				if err = unmarshal_value(&variant_p, any{v.data, variant.id}, flags); err == nil {
+					p^ = variant_p
+					p.union_attempt = .None
+					unmarshal_union_tag(v, u, i)
+					return
+				}
+			} else {
+				attempt_p := p^
+				attempt_p.union_attempt = attempt
+				if err = unmarshal_union_attempt(&attempt_p, variant, &arena, flags); err == nil {
+					unmarshal_union_tag(v, u, i)
+					variant_p := p^
+					unmarshal_value(&variant_p, any{v.data, variant.id}, flags) or_return
+					p^ = variant_p
+					return
+				}
+			}
+			if err == Error.Max_Depth_Exceeded || err == Error.Out_Of_Memory {
+				return
+			}
+			if direct {
+				#partial switch e in err {
+				case Unsupported_Type_Error: delete(e.field, p.allocator)
+				case Unknown_Field_Error:    delete(e.field, p.allocator)
+				}
+			}
 		}
 	}
+	mem.zero(v.data, size)
 	return UNSUPPORTED_TYPE
+}
+
+@(private)
+unmarshal_union_tag :: proc(v: any, u: ^reflect.Type_Info_Union, index: int) {
+	raw_tag := index
+	if !u.no_nil { raw_tag += 1 }
+	tag := any{rawptr(uintptr(v.data) + u.tag_offset), u.tag_type.id}
+	assign_int(tag, i128(raw_tag))
+}
+
+@(private)
+unmarshal_union_attempt :: proc(p: ^Parser, variant: ^reflect.Type_Info, arena: ^mem.Dynamic_Arena, flags: Unmarshal_Flags) -> Unmarshal_Error {
+	mem.dynamic_arena_reset(arena)
+	allocator := mem.dynamic_arena_allocator(arena)
+	scratch, alloc_err := mem.alloc(max(variant.size, 1), max(variant.align, 1), allocator)
+	if alloc_err != nil {
+		return .Out_Of_Memory if alloc_err == .Out_Of_Memory else .Invalid_Allocator
+	}
+	p.allocator = allocator
+	context.allocator = allocator
+	return unmarshal_value(p, any{scratch, variant.id}, flags)
+}
+
+@(private)
+unmarshal_may_allocate :: proc(id: typeid) -> bool {
+	if _user_unmarshalers != nil && id in _user_unmarshalers^ {
+		return true
+	}
+	ti := reflect.type_info_base(type_info_of(id))
+	#partial switch info in ti.variant {
+	case ^reflect.Type_Info_Integer, ^reflect.Type_Info_Rune, ^reflect.Type_Info_Float, ^reflect.Type_Info_Complex,
+	     ^reflect.Type_Info_Quaternion, ^reflect.Type_Info_Boolean, ^reflect.Type_Info_Enum, ^reflect.Type_Info_Bit_Set,
+	     ^reflect.Type_Info_Bit_Field:
+		return false
+	case ^reflect.Type_Info_Array:
+		return unmarshal_may_allocate(info.elem.id)
+	case ^reflect.Type_Info_Enumerated_Array:
+		return unmarshal_may_allocate(info.elem.id)
+	case ^reflect.Type_Info_Struct:
+		for i in 0..<info.field_count {
+			if unmarshal_may_allocate(info.types[i].id) {
+				return true
+			}
+		}
+		return false
+	case ^reflect.Type_Info_Union:
+		for variant in info.variants {
+			if unmarshal_may_allocate(variant.id) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 @(private)
@@ -927,6 +1026,9 @@ unmarshal_struct :: proc(p: ^Parser, v: any, ti: ^reflect.Type_Info, end_token: 
 				}
 			}
 
+			if p.union_attempt == .Strict {
+				return Unsupported_Type_Error{id = v.id, token = p.curr_token}
+			}
 			// allows skipping unused struct fields
 			if skip_err := skip_value(p, !p.tok.validated); skip_err != nil {
 				return syntax_error(p, skip_err, flags)
@@ -1091,9 +1193,9 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 	defer if elem_on_heap {
 		delete(elem_backing, p.allocator)
 	}
+	mem.zero_slice(elem_backing)
 
-	map_backing_value := any{raw_data(elem_backing), t.value.id}
-	is_int_key        := reflect.is_integer(t.key)
+	is_int_key := reflect.is_integer(t.key)
 
 	map_loop: for p.curr_token.kind != end_token {
 		key_buf: [256]byte = ---
@@ -1103,14 +1205,16 @@ unmarshal_map :: proc(p: ^Parser, v: any, t: ^reflect.Type_Info_Map, end_token: 
 			delete(key, p.allocator)
 		}
 
-		mem.zero_slice(elem_backing)
-		unmarshal_value(p, map_backing_value, flags) or_return
-
+		value: rawptr
 		inserted: bool
-		key_stored, inserted = unmarshal_map_insert(raw_map, t, key, map_backing_value.data)
+		key_stored, value, inserted = unmarshal_map_insert(raw_map, t, key, raw_data(elem_backing))
 		if !inserted {
 			return Unsupported_Type_Error{id = v.id, token = start}
 		}
+		if value == nil {
+			return .Out_Of_Memory
+		}
+		unmarshal_value(p, any{value, t.value.id}, flags) or_return
 
 		if parse_comma(p) {
 			break map_loop
@@ -1147,7 +1251,7 @@ unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte, flags: 
 }
 
 @(private)
-unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, value: rawptr) -> (stored, ok: bool) {
+unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, value: rawptr) -> (stored: bool, slot: rawptr, ok: bool) {
 	key := key
 	key_ptr:  rawptr
 	key_cstr: cstring
@@ -1165,13 +1269,13 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 		case ^runtime.Type_Info_Integer:
 			int_ok: bool
 			key_int, int_ok = parse_integer(key)
-			if !int_ok { return false, false }
+			if !int_ok { return false, nil, false }
 			key_ptr = &key_int
-		case: return false, false
+		case: return false, nil, false
 	}
 
 	set_ptr := runtime.__dynamic_map_set_without_hash(raw_map, t.map_info, key_ptr, value)
-	return set_ptr != nil && !reflect.is_integer(t.key), true
+	return set_ptr != nil && !reflect.is_integer(t.key), set_ptr, true
 }
 
 @(private)

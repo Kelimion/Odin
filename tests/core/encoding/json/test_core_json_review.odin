@@ -261,7 +261,7 @@ review_nesting_limit :: proc(t: ^testing.T) {
 		x: UArr
 		p := json.make_parser(nested("[", "]", 100_000), parse_integers = true, allocator = mem.tracking_allocator(&track))
 		err := json.unmarshal_value(&p, x, flags)
-		testing.expectf(t, err == json.Error.Max_Depth_Exceeded && track.total_allocation_count == 0, "%v: %v after %d allocations", flags, err, track.total_allocation_count)
+		testing.expectf(t, err == json.Error.Max_Depth_Exceeded && track.total_allocation_count <= 2 && len(track.allocation_map) == 0, "%v: %v after %d allocations, %d live", flags, err, track.total_allocation_count, len(track.allocation_map))
 	}
 
 	root := strings.concatenate({"a: ", nested("[", "]", json.MAX_DEPTH)}, context.temp_allocator)
@@ -1154,4 +1154,232 @@ review_unmarshal_unvalidated_errors :: proc(t: ^testing.T) {
 			testing.expectf(t, ab_err == json.Error.Out_Of_Memory, "%v with %d allocations: %v", flags, n, ab_err)
 		}
 	}
+}
+
+@(test)
+review_unmarshal_union_best_fit :: proc(t: ^testing.T) {
+	A :: struct {
+		a: int,
+	}
+	B :: struct {
+		b: string,
+	}
+	AB :: union {
+		A,
+		B,
+	}
+	for spec in SPECS {
+		ab: AB
+		err := json.unmarshal_string(`{"b": "Hellope"}`, &ab, spec)
+		b, is_b := ab.(B)
+		testing.expectf(t, err == nil && is_b && b.b == "Hellope", "%v: %v %v", spec, ab, err)
+		delete(b.b)
+
+		for src in ([]string{`{"a": 1}`, `{"a": 1, "c": 2}`, `{"c": 2}`, `{}`}) {
+			ab = nil
+			err = json.unmarshal_string(src, &ab, spec)
+			a, is_a := ab.(A)
+			testing.expectf(t, err == nil && is_a && a.a == (0 if src == `{"c": 2}` || src == `{}` else 1), "%v %s: %v %v", spec, src, ab, err)
+		}
+	}
+
+	written, merr := json.marshal(AB(B{b = "x"}), allocator = context.temp_allocator)
+	back: AB
+	err := json.unmarshal(written, &back, allocator = context.temp_allocator)
+	back_b, back_is_b := back.(B)
+	testing.expectf(t, merr == nil && err == nil && back_is_b && back_b.b == "x", "%s: %v %v %v", written, back, merr, err)
+
+	A2 :: struct {
+		a, bad: int,
+	}
+	B2 :: struct {
+		b, c: int,
+	}
+	stale: union{A2, B2}
+	err = json.unmarshal_string(`{"a": 5, "bad": "zz"}`, &stale)
+	b2, is_b2 := stale.(B2)
+	testing.expectf(t, err == nil && is_b2 && b2 == {}, "%v %v", stale, err)
+
+	A3 :: struct {
+		name: string,
+		n:    int,
+	}
+	B3 :: struct {
+		name, n: string,
+	}
+	AB3 :: union {
+		A3,
+		B3,
+	}
+	ab3: AB3
+	err = json.unmarshal_string(`{"name": "x", "n": "y"}`, &ab3)
+	b3, is_b3 := ab3.(B3)
+	testing.expectf(t, err == nil && is_b3 && b3 == {"x", "y"}, "%v %v", ab3, err)
+	delete(b3.name)
+	delete(b3.n)
+
+	for n in 0..<64 {
+		f := Failing_Allocator{backing = context.temp_allocator, left = n}
+		got: AB3
+		ferr := json.unmarshal_string(`{"name": "x", "n": "y"}`, &got, allocator = failing_allocator(&f))
+		if ferr == nil {
+			got_b, got_is_b := got.(B3)
+			testing.expectf(t, got_is_b && got_b == {"x", "y"}, "with %d allocations: %v", n, got)
+			break
+		}
+		testing.expectf(t, ferr == json.Error.Out_Of_Memory, "with %d allocations: %v", n, ferr)
+	}
+
+	P :: struct {
+		x: int,
+	}
+	Q :: struct {
+		y: int,
+	}
+	none := Failing_Allocator{backing = context.allocator}
+	pq: union{P, Q}
+	err = json.unmarshal_string(`{"y": 1}`, &pq, allocator = failing_allocator(&none))
+	q, is_q := pq.(Q)
+	testing.expectf(t, err == nil && is_q && q.y == 1, "%v %v", pq, err)
+	wide: union{i8, i64}
+	err = json.unmarshal_string(`300`, &wide, allocator = failing_allocator(&none), flags = {.Disallow_Integer_Wrap})
+	testing.expectf(t, err == nil && wide == i64(300), "%v %v", wide, err)
+
+	Flat :: struct {
+		arr:   [2]i8,
+		en:    [Nest_Key]u8,
+		inner: union{u8, Q},
+		bits:  bit_set[0..<8],
+		f:     f32,
+		ok:    bool,
+	}
+	flat: union{P, Flat}
+	err = json.unmarshal_string(`{"arr": [1, 2], "en": {"A": 3}, "inner": {"y": 4}, "bits": 5, "f": 0.5, "ok": true}`, &flat, allocator = failing_allocator(&none))
+	fl, is_flat := flat.(Flat)
+	testing.expectf(t, err == nil && is_flat && fl.arr == {1, 2} && fl.en[.A] == 3 && fl.inner == Q{4} && fl.bits == {0, 2} && fl.f == 0.5 && fl.ok, "%v %v", flat, err)
+}
+
+@(test)
+review_unmarshal_union_nested_fit :: proc(t: ^testing.T) {
+	IA :: struct {
+		a: int,
+	}
+	IB :: struct {
+		a, b: int,
+	}
+	X :: struct {
+		inner: IA,
+	}
+	Y :: struct {
+		inner: IB,
+	}
+	xy: union{X, Y}
+	err := json.unmarshal_string(`{"inner": {"a": 1, "b": 2}}`, &xy)
+	y, is_y := xy.(Y)
+	testing.expectf(t, err == nil && is_y && y.inner == {1, 2}, "%v %v", xy, err)
+
+	XS :: struct {
+		inner: IA,
+		s:     string,
+	}
+	YS :: struct {
+		inner: IB,
+		s:     string,
+	}
+	xys: union{XS, YS}
+	err = json.unmarshal_string(`{"inner": {"a": 1, "b": 2}, "s": "q"}`, &xys)
+	ys, is_ys := xys.(YS)
+	testing.expectf(t, err == nil && is_ys && ys.inner == {1, 2} && ys.s == "q", "%v %v", xys, err)
+	delete(ys.s)
+
+	Inner :: union {
+		IA,
+		IB,
+	}
+	W :: struct {
+		u: Inner,
+		s: string,
+	}
+	ws: []union{W, int}
+	err = json.unmarshal_string(`[{"u": {"a": 1, "b": 2}, "s": "q"}, 3, {"u": {"a": 4}, "s": ""}]`, &ws)
+	testing.expectf(t, err == nil && len(ws) == 3, "%v %v", ws, err)
+	if len(ws) == 3 {
+		w0, w0_ok := ws[0].(W)
+		w2, w2_ok := ws[2].(W)
+		testing.expectf(t, w0_ok && w0.u == IB{1, 2} && w0.s == "q" && ws[1] == 3 && w2_ok && w2.u == IA{4}, "%v", ws)
+		delete(w0.s)
+		delete(w2.s)
+	}
+	delete(ws)
+
+	After :: struct {
+		u: Inner,
+		x: int,
+	}
+	after: After
+	err = json.unmarshal_string(`{"u": {"a": 1}, "zz": 2, "x": 3}`, &after)
+	testing.expectf(t, err == nil && after.u == IA{1} && after.x == 3, "%v %v", after, err)
+
+	Letter :: enum {
+		q,
+	}
+	IE :: struct {
+		a: Letter,
+	}
+	Named :: union {
+		IA,
+		IE,
+	}
+	Holder :: struct {
+		u: Named,
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	held: union{Holder, int}
+	err = json.unmarshal_string(`{"u": {"a": "q"}}`, &held, allocator = mem.tracking_allocator(&track))
+	h, is_h := held.(Holder)
+	testing.expectf(t, err == nil && is_h && h.u == IE{.q}, "%v %v", held, err)
+	testing.expectf(t, len(track.allocation_map) == 0, "leaked %v", len(track.allocation_map))
+
+	Text :: union {
+		int,
+		string,
+	}
+	SX :: struct {
+		u: Text,
+		x: int,
+	}
+	SY :: struct {
+		u: Text,
+		y: int,
+	}
+	sxy: union{SX, SY}
+	err = json.unmarshal_string(`{"u": "hello", "y": 1}`, &sxy, allocator = mem.tracking_allocator(&track))
+	sy, is_sy := sxy.(SY)
+	testing.expectf(t, err == nil && is_sy && sy.u == "hello" && sy.y == 1, "%v %v", sxy, err)
+	if text, is_text := sy.u.(string); is_text {
+		delete(text, mem.tracking_allocator(&track))
+	}
+	testing.expectf(t, len(track.allocation_map) == 0, "leaked %v", len(track.allocation_map))
+}
+
+@(test)
+review_unmarshal_map_value_error_keeps_value :: proc(t: ^testing.T) {
+	V :: struct {
+		a: string,
+		b: int,
+	}
+	m: map[string]V
+	err := json.unmarshal_string(`{"k": {"a": "x", "b": "y"}}`, &m)
+	_, unsupported := err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && len(m) == 1 && m["k"].a == "x", "%v %v", m, err)
+	if e, is_e := err.(json.Unsupported_Type_Error); is_e {
+		delete(e.field)
+	}
+	for k, val in m {
+		delete(k)
+		delete(val.a)
+	}
+	delete(m)
 }
