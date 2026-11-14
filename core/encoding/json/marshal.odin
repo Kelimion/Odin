@@ -531,7 +531,8 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 					opt_write_key(w, opt, json_name) or_return
 				} else {
 					// Marshal the fields of 'using _: T' fields directly into the parent struct
-					if info.usings[i] && name == "_" {
+					_, is_struct := runtime.type_info_base(info.types[i]).variant.(^runtime.Type_Info_Struct)
+					if is_struct && info.usings[i] && name == "_" {
 						marshal_struct_fields(w, the_value, opt) or_return
 						continue
 					} else {
@@ -553,6 +554,14 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 		if len(info.variants) == 0 || v.data == nil {
 			io.write_string(w, "null") or_return
 			return nil
+		}
+
+		if reflect.type_info_union_is_pure_maybe(info^) {
+			if (^rawptr)(v.data)^ == nil {
+				io.write_string(w, "null") or_return
+				return nil
+			}
+			return _marshal_to_writer(w, any{v.data, info.variants[0].id}, opt)
 		}
 
 		tag_ptr := uintptr(v.data) + info.tag_offset
@@ -610,7 +619,7 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 			return false
 		}
 
-		bit_data: u64
+		bit_data: u128
 		bit_size := u64(8*ti.size)
 
 		do_byte_swap := is_bit_set_different_endian_to_platform(info.underlying)
@@ -619,28 +628,34 @@ _marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err:
 		case  0: bit_data = 0
 		case  8:
 			x := (^u8)(v.data)^
-			bit_data = u64(x)
+			bit_data = u128(x)
 		case 16:
 			x := (^u16)(v.data)^
 			if do_byte_swap {
 				x = bits.byte_swap(x)
 			}
-			bit_data = u64(x)
+			bit_data = u128(x)
 		case 32:
 			x := (^u32)(v.data)^
 			if do_byte_swap {
 				x = bits.byte_swap(x)
 			}
-			bit_data = u64(x)
+			bit_data = u128(x)
 		case 64:
 			x := (^u64)(v.data)^
 			if do_byte_swap {
 				x = bits.byte_swap(x)
 			}
-			bit_data = u64(x)
+			bit_data = u128(x)
+		case 128:
+			x := (^u128)(v.data)^
+			if do_byte_swap {
+				x = bits.byte_swap(x)
+			}
+			bit_data = x
 		case: panic("unknown bit_size size")
 		}
-		io.write_u64(w, bit_data) or_return
+		io.write_u128(w, bit_data) or_return
 	}
 
 	return

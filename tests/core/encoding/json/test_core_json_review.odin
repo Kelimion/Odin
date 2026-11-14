@@ -1874,3 +1874,59 @@ review_unmarshal_sjson_root_into_value :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+review_marshal_crashes :: proc(t: ^testing.T) {
+	Wide    :: bit_set[0..<128]
+	Wide_BE :: bit_set[0..<128; u128be]
+	Wide_Case :: struct {
+		set:  Wide,
+		text: string,
+	}
+	WIDE_CASES :: []Wide_Case{
+		{{},       "0"},
+		{{0, 100}, "1267650600228229401496703205377"},
+		{{127},    "170141183460469231731687303715884105728"},
+	}
+	for c in WIDE_CASES {
+		data, err := json.marshal(c.set, allocator = context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == c.text, "%v: %s %v", c.set, data, err)
+		data, err = json.marshal(transmute(Wide_BE)u128be(transmute(u128)c.set), allocator = context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == c.text, "%v be: %s %v", c.set, data, err)
+		back: Wide
+		uerr := json.unmarshal_string(c.text, &back, allocator = context.temp_allocator)
+		testing.expectf(t, uerr == nil && back == c.set, "%v: %v %v", c.set, back, uerr)
+	}
+
+	mi: Maybe(^int)
+	data, err := json.marshal(mi, allocator = context.temp_allocator)
+	testing.expectf(t, err == nil && string(data) == "null", "%s %v", data, err)
+	x := 5
+	mi = &x
+	data, err = json.marshal(mi, allocator = context.temp_allocator)
+	testing.expectf(t, err == json.Marshal_Data_Error.Unsupported_Type, "%s %v", data, err)
+
+	Holder :: struct {
+		c: Maybe(cstring),
+		n: int,
+	}
+	for c in ([]struct{h: Holder, text: string}{{{n = 1}, `{"c":null,"n":1}`}, {{c = "hi", n = 1}, `{"c":"hi","n":1}`}}) {
+		data, err = json.marshal(c.h, allocator = context.temp_allocator)
+		testing.expectf(t, err == nil && string(data) == c.text, "%v: %s %v", c.h, data, err)
+	}
+
+	Inner :: struct {
+		x: int,
+	}
+	Ptr_Using :: struct {
+		using _: ^Inner,
+		y: int,
+	}
+	pu := Ptr_Using{y = 2}
+	inner := Inner{x = 1}
+	for ptr in ([]^Inner{nil, &inner}) {
+		(^^Inner)(&pu)^ = ptr
+		data, err = json.marshal(pu, allocator = context.temp_allocator)
+		testing.expectf(t, err == json.Marshal_Data_Error.Unsupported_Type, "%v: %s %v", ptr, data, err)
+	}
+}

@@ -13,7 +13,7 @@ import "base:runtime"
 
 @test
 parse_json :: proc(t: ^testing.T) {
-   
+
 	json_data := `
 	{
 	  "firstName": "John",
@@ -40,7 +40,7 @@ parse_json :: proc(t: ^testing.T) {
 	  "spouse": null
 	}
 	`
-   
+
 	val, err := json.parse(transmute([]u8)json_data)
 	json.destroy_value(val)
 	testing.expectf(t, err == nil, "Expected `json.parse` to return nil, got %v", err)
@@ -54,7 +54,7 @@ out_of_memory_in_parse_json :: proc(t: ^testing.T) {
 	testing.expectf(t, arena_init_error == nil, "Expected arena initialization to not return error, got: %v\n", arena_init_error)
 
 	context.allocator = virtual.arena_allocator(&arena)
-	
+
 	json_data := `
 	{
 	  "firstName": "John",
@@ -130,17 +130,17 @@ out_of_memory_in_unmarshal :: proc(t: ^testing.T) {
 
 @test
 marshal_json :: proc(t: ^testing.T) {
-   
+
 	My_Struct :: struct {
 		a: int,
 		b: int,
 	}
-   
+
 	my_struct := My_Struct {
 		a = 2,
 		b = 5,
 	}
-   
+
 	data, err := json.marshal(my_struct)
 	defer delete(data)
 	testing.expectf(t, err == nil, "Expected `json.marshal` to return nil, got %v", err)
@@ -516,7 +516,7 @@ map_with_integer_keys :: proc(t: ^testing.T) {
 
 	marshaled_data, marshal_err := json.marshal(my_map)
 	defer delete(marshaled_data)
-	
+
 	testing.expectf(t, marshal_err == nil, "Expected `json.marshal` to return nil error, got %v", marshal_err)
 
 	my_map2 := make(map[i32]string)
@@ -532,7 +532,7 @@ map_with_integer_keys :: proc(t: ^testing.T) {
 
 	for key, item in my_map {
 		testing.expectf(t, key in my_map2, "Expected key %v to be present in unmarshaled map", key)
-		
+
 		if key in my_map2 {
 			testing.expectf(t, runtime.string_eq(item, my_map2[key]), "Expected value %s to be present in unmarshaled map", key)
 		}
@@ -993,10 +993,9 @@ marshal_floats_round_trip :: proc(t: ^testing.T) {
 
 @(test)
 parse_integers_out_of_range :: proc(t: ^testing.T) {
-	// An integer outside i64 wraps to 64 bits in a `Value`, the same as when it is unmarshalled
-	// TODO-UPDATE-COMMENT: integers in u128 past i128 are now read whole and wrapped. Proposed: "An integer outside i64 wraps to 64 bits in a `Value`, the same as when it is unmarshalled into an `i64`. Past u128 only the digits that fit in an i128 are read."
-	// ---
-	// into an `i64`. Past i128 only the digits that fit in an i128 are read.
+	// An integer outside i64 wraps to 64 bits in a `Value`,
+	// the same as when it is unmarshalled into an `i64`.
+	// Past u128 only the digits that fit in an i128 are read.
 	Case :: struct {
 		text:     string,
 		spec:     json.Specification,

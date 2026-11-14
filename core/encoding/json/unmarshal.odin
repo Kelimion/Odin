@@ -47,9 +47,9 @@ Unmarshal_Flag :: enum {
 	// Count an object's entries and reserve the map once rather than growing it
 	Reserve_Maps,
 
-	// TODO-UPDATE-COMMENT: maps and enumerated arrays now report duplicates too, and with the flag earlier occurrences are skipped instead of merged. Proposed: "Accept duplicate keys in an object (struct fields, map keys, enumerated array indices) rather than returning `.Multiple_Use_Field`. Only the last occurrence is unmarshalled; the object's keys are scanned first to find it."
-	// ---
-	// Accept duplicate keys for a struct field, the last value winning, rather than returning `.Multiple_Use_Field`
+	// Accept duplicate keys in an object (struct fields, map keys, enumerated array indices) rather
+	// than returning `.Multiple_Use_Field`. Only the last occurrence is unmarshalled; the object's
+	// keys are scanned first to find it.
 	Allow_Duplicate_Fields,
 
 	// Return an `Unknown_Field_Error` for a key that matches no struct field, rather than skipping it
@@ -94,7 +94,8 @@ Registers a user-defined unmarshaler for a specific `typeid`.
 
 WARNING: set_user_unmarshalers must be called before using this procedure.
 
-// TODO-UPDATE-COMMENT: new: braceless SJSON roots bypass the root type's unmarshaler. Proposed: "NOTE: With SJSON, a document whose root object has no braces (`a = 1`) is unmarshalled key by key, so an unmarshaler registered for the root type is not called for it."
+NOTE: With SJSON, a document whose root object has no braces (`a = 1`) is unmarshalled key by key,
+so an unmarshaler registered for the root type is not called for it.
 
 Inputs:
 - id: The `typeid` of the custom type.
@@ -274,7 +275,8 @@ assign_int :: proc(val: any, i: $T, fits_only := false) -> bool {
 		return true
 	}
 
-	// TODO-UPDATE-COMMENT: new: why `bit_field` is rejected. Proposed: "`bit_field` is rejected to match marshal (a4b8c1ea1, 2024-02); integers only reached its backing after `type_info_core` began unwrapping `bit_field` (af6d2480f, 2024-04)."
+	// `bit_field` is rejected to match marshal (a4b8c1ea1, 2024-02);
+	// integers only reached its backing after `type_info_core` began unwrapping `bit_field` (af6d2480f, 2024-04).
 	if _, is_bit_field := reflect.type_info_base(type_info_of(val.id)).variant.(^runtime.Type_Info_Bit_Field); is_bit_field {
 		return false
 	}
