@@ -64,7 +64,11 @@ parse_string :: proc(data: string, spec := DEFAULT_SPECIFICATION, parse_integers
 	case .SJSON:
 		#partial switch p.curr_token.kind {
 		case .Ident, .String:
-			return parse_object_body(&p, .EOF, loc)
+			obj, err := parse_object_body(&p, .EOF, loc)
+			if err != nil {
+				return nil, err
+			}
+			return obj, nil
 		}
 		return parse_value(&p, loc)
 	}
@@ -310,7 +314,11 @@ parse_array :: proc(p: ^Parser, loc := #caller_location) -> (value: Value, err: 
 
 	for p.curr_token.kind != .Close_Bracket {
 		elem := parse_value(p, loc) or_return
-		append(&array, elem, loc)
+		if _, append_err := append(&array, elem, loc); append_err != nil {
+			destroy_value(elem, p.allocator, loc)
+			err = .Out_Of_Memory if append_err == .Out_Of_Memory else .Invalid_Allocator
+			return
+		}
 
 		if parse_comma(p) {
 			break
@@ -394,6 +402,7 @@ parse_object_body :: proc(p: ^Parser, end_token: Token_Kind, loc := #caller_loca
 			destroy_value(elem, loc=loc)
 		}
 		delete(obj, loc)
+		obj = nil
 	}
 
 	for p.curr_token.kind != end_token {
@@ -420,23 +429,18 @@ parse_object_body :: proc(p: ^Parser, end_token: Token_Kind, loc := #caller_loca
 			destroy_value(elem, loc = loc)
 		}
 
-		if key in obj {
+		_, value_ptr, just_inserted, insert_err := map_entry(&obj, key, loc)
+		if insert_err != nil {
+			err = .Out_Of_Memory if insert_err == .Out_Of_Memory else .Invalid_Allocator
+			return
+		}
+		if !just_inserted {
 			err = .Duplicate_Object_Key
 			return
 		}
-
-		// NOTE(gonz): There are code paths for which this traversal ends up
-		// inserting empty key/values into the object and for those we do not
-		// want to allocate anything
-		if key != "" {
-			reserve_error := reserve(&obj, len(obj) + 1, loc)
-			if reserve_error == mem.Allocator_Error.Out_Of_Memory {
-				return nil, .Out_Of_Memory
-			}
-			obj[key] = elem
-			key_stored = true
-			elem_stored = true
-		}
+		value_ptr^ = elem
+		key_stored = true
+		elem_stored = true
 
 		if parse_comma(p) {
 			break
