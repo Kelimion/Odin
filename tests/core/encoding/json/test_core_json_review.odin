@@ -1105,6 +1105,21 @@ review_unmarshal_beyond_i128 :: proc(t: ^testing.T) {
 	defer delete(m)
 	err = json.unmarshal_string(`{"170141183460469231731687303715884105728": 1}`, &m)
 	testing.expectf(t, err == nil && len(m) == 1 && m[1 << 127] == 1, "%v %v", m, err)
+
+	floats: [2]u128
+	err = json.unmarshal_string("[2e38, 1.7014118346046923e38]", &floats, flags = {.Disallow_Integer_Wrap})
+	testing.expectf(t, err == nil && floats == {199999999999999995497619646912068059136, 1 << 127}, "%v %v", floats, err)
+	s = {}
+	err = json.unmarshal_string(`{"flags": 1.7014118346046923e38, "u": 2.5e38, "w": 1.7014118346046923e38}`, &s)
+	testing.expectf(t, err == nil && s.flags == {127} && s.u > 1 << 127 && s.w == 0, "%v %v", s, err)
+	err = json.unmarshal_string(`{"w": 2e38}`, &s, flags = {.Disallow_Integer_Wrap})
+	e, unsupported = err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && e.field == "w", "%v", err)
+	delete(e.field)
+	err = json.unmarshal_string(`{"u": 3.5e38}`, &s)
+	e, unsupported = err.(json.Unsupported_Type_Error)
+	testing.expectf(t, unsupported && e.field == "u", "%v", err)
+	delete(e.field)
 }
 
 @(test)
@@ -1118,6 +1133,72 @@ review_unmarshal_string16_map_keys :: proc(t: ^testing.T) {
 	err = json.unmarshal_string(`{"a": 1}`, &mc16)
 	_, unsupported = err.(json.Unsupported_Type_Error)
 	testing.expectf(t, unsupported && len(mc16) == 0, "%v %v", mc16, err)
+}
+
+@(test)
+review_unmarshal_map_key_types :: proc(t: ^testing.T) {
+	Id   :: distinct u16
+	Name :: distinct string
+
+	be: map[u16be]int
+	defer delete(be)
+	err := json.unmarshal_string(`{"1": 5, "258": 6}`, &be)
+	testing.expectf(t, err == nil && len(be) == 2 && be[1] == 5 && be[258] == 6, "%v %v", be, err)
+	err = json.unmarshal_string(`{"258": 7, "513": 8}`, &be)
+	testing.expectf(t, err == nil && len(be) == 3 && be[1] == 5 && be[258] == 7 && be[513] == 8, "%v %v", be, err)
+
+	be32: map[i32be]int
+	defer delete(be32)
+	err = json.unmarshal_string(`{"-2": 5}`, &be32)
+	testing.expectf(t, err == nil && len(be32) == 1 && be32[-2] == 5, "%v %v", be32, err)
+
+	be128: map[u128be]int
+	defer delete(be128)
+	err = json.unmarshal_string(`{"1": 5, "1": 6}`, &be128, flags = {.Allow_Duplicate_Fields})
+	testing.expectf(t, err == nil && len(be128) == 1 && be128[1] == 6, "%v %v", be128, err)
+
+	ids: map[Id]int
+	defer delete(ids)
+	err = json.unmarshal_string(`{"1": 5, "65537": 6}`, &ids, flags = {.Allow_Duplicate_Fields})
+	testing.expectf(t, err == nil && len(ids) == 1 && ids[1] == 6, "%v %v", ids, err)
+
+	names: map[Name]int
+	err = json.unmarshal_string(`{"a": 5}`, &names)
+	testing.expectf(t, err == nil && len(names) == 1 && names["a"] == 5, "%v %v", names, err)
+	for k in names {
+		delete(string(k))
+	}
+	delete(names)
+
+	round: map[i16be]int
+	defer delete(round)
+	round[-300] = 1
+	round[300] = 2
+	data, merr := json.marshal(round, {sort_maps_by_key = true}, context.temp_allocator)
+	back: map[i16be]int
+	defer delete(back)
+	err = json.unmarshal(data, &back)
+	testing.expectf(t, merr == nil && err == nil && len(back) == 2 && back[-300] == 1 && back[300] == 2, "%s: %v %v %v", data, back, merr, err)
+}
+
+@(test)
+review_unmarshal_empty_rune :: proc(t: ^testing.T) {
+	for spec in ([]json.Specification{.JSON, .JSON5}) {
+		r := 'x'
+		err := json.unmarshal_string(`""`, &r, spec, context.temp_allocator)
+		testing.expectf(t, err == json.Error.Invalid_Rune && r == 'x', "%v: %q %v", spec, r, err)
+
+		ru: union{rune, string}
+		err = json.unmarshal_string(`""`, &ru, spec, context.temp_allocator)
+		testing.expectf(t, err == nil && ru == "", "%v: %v %v", spec, ru, err)
+	}
+
+	S :: struct {
+		r: rune,
+	}
+	s := S{r = 'q'}
+	err := json.unmarshal_string(`r = ""`, &s, .SJSON, context.temp_allocator)
+	testing.expectf(t, err == json.Error.Invalid_Rune && s.r == 'q', "%v %v", s, err)
 }
 
 @(test)

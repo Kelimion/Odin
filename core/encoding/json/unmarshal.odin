@@ -617,6 +617,9 @@ unmarshal_string_token :: proc(p: ^Parser, val: any, token: Token, ti: ^reflect.
 
 	switch &dst in val {
 	case rune:
+		if str == "" {
+			return false, .Invalid_Rune
+		}
 		for rne, i in str {
 			if i > 0 {
 				dst = {}
@@ -926,6 +929,10 @@ unmarshal_scalar :: proc(p: ^Parser, v: any, id: typeid, ti: ^reflect.Type_Info)
 		}
 		if i, fract := math.modf(f); fract == 0 && -(1 << 127) <= i && i < 1 << 127 {
 			if assign_int(v, i128(i), .Disallow_Integer_Wrap in p.flags) {
+				return
+			}
+		} else if fract == 0 && 1 << 127 <= i && i < 1 << 128 {
+			if assign_int(v, u128(i), .Disallow_Integer_Wrap in p.flags) {
 				return
 			}
 		}
@@ -1554,11 +1561,11 @@ unmarshal_map_key :: proc(p: ^Parser, is_int_key: bool, key_buf: []byte) -> (key
 @(private)
 unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, key: string, zero: rawptr, spec: Specification) -> (slot: rawptr, fresh: bool, ok: bool) {
 	key := key
-	key_ptr:  rawptr
-	key_cstr: cstring
-	key_int:  i128
+	key_ptr:     rawptr
+	key_cstr:    cstring
+	key_storage: u128
 
-	#partial switch tk in t.key.variant {
+	#partial switch tk in reflect.type_info_base(t.key).variant {
 		case ^runtime.Type_Info_String:
 			assert(tk.encoding == .UTF_8)
 
@@ -1569,14 +1576,14 @@ unmarshal_map_insert :: proc(raw_map: ^mem.Raw_Map, t: ^reflect.Type_Info_Map, k
 			}
 		case ^runtime.Type_Info_Integer:
 			if number_text_kind(key, spec) != .Integer { return nil, false, false }
-			int_ok: bool
-			key_int, int_ok = parse_integer(key)
+			key_int, int_ok := parse_integer(key)
 			if !int_ok {
 				key_u, u_ok := parse_unsigned_integer(key)
 				if !u_ok { return nil, false, false }
 				key_int = i128(key_u)
 			}
-			key_ptr = &key_int
+			if !assign_int(any{&key_storage, t.key.id}, key_int) { return nil, false, false }
+			key_ptr = &key_storage
 		case: return nil, false, false
 	}
 
