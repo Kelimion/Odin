@@ -297,8 +297,12 @@ Inflate_Table_Builder :: struct {
 	length: i32,
 	count:  i32,
 	word:   i32,
+	code:   u32,
 	sorted: []i16,
 }
+
+@(rodata, private)
+INFLATE_ONE_HOT := [32]u8{16 = 1}
 
 Gzip_Magic :: enum u16le {
 	GZIP = 0x8b << 8 | 0x1f,

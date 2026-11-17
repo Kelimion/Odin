@@ -271,7 +271,6 @@ inflate_build_table :: proc(builder: ^Inflate_Table_Builder, table: []u32, table
 	table_end = i32(1) << u32(builder.length)
 	for builder.length <= table_bits {
 		for { // do {...} while (--gen->cnt);
-			bit: u32 = 0
 			table[builder.word] = inflate_symbol_entry(kind, i32(builder.sorted[0])) + u32(builder.length) * 0x101
 			builder.sorted = builder.sorted[1:]
 			if builder.word == table_end - 1 {
@@ -281,9 +280,14 @@ inflate_build_table :: proc(builder: ^Inflate_Table_Builder, table: []u32, table
 				}
 				return 1
 			}
-			bit = u32(1) << log2(u32(builder.word ~ (table_end - 1)))
-			builder.word &= i32(bit) - 1
-			builder.word |= i32(bit)
+			when ODIN_ARCH == .arm64 {
+				builder.code += u32(0x80000000) >> u32(builder.length - 1)
+				builder.word  = i32(intrinsics.reverse_bits(builder.code))
+			} else {
+				bit := u32(1) << log2(u32(builder.word ~ (table_end - 1)))
+				builder.word &= i32(bit) - 1
+				builder.word |= i32(bit)
+			}
 			builder.count -= 1
 			if builder.count == 0 { break }
 		}
@@ -308,7 +312,7 @@ inflate_build_sub_table :: proc(builder: ^Inflate_Table_Builder, table: []u32, t
 	table_end:  i32 = i32(1) << u32(table_bits)
 	for {
 		entry: u32
-		bit, stride, i: i32
+		stride, i: i32
 		// start new sub-table
 		if (builder.word & ((i32(1) << u32(table_bits)) - 1)) != sub_prefix {
 			used: i32 = 0
@@ -336,15 +340,37 @@ inflate_build_sub_table :: proc(builder: ^Inflate_Table_Builder, table: []u32, t
 		if builder.word == (i32(1) << u32(builder.length)) - 1 {
 			return
 		}
-		bit = i32(1) << log2(u32(builder.word ~ ((i32(1) << u32(builder.length)) - 1)))
-		builder.word &= bit - 1
-		builder.word |= bit
+		when ODIN_ARCH == .arm64 {
+			builder.code += u32(0x80000000) >> u32(builder.length - 1)
+			builder.word  = i32(intrinsics.reverse_bits(builder.code))
+		} else {
+			bit := i32(1) << log2(u32(builder.word ~ ((i32(1) << u32(builder.length)) - 1)))
+			builder.word &= bit - 1
+			builder.word |= bit
+		}
 		builder.count -= 1
 		for builder.count == 0 {
 			builder.length += 1
 			builder.count = counts[builder.length]
 		}
 	}
+}
+
+@(private)
+inflate_count_lengths :: #force_inline proc(counts: ^[16]i32, lengths: []u8) #no_bounds_check {
+	assert(len(lengths) <= 2 * 255)
+	a, b: simd.u8x16
+	p := raw_data(lengths)
+	n := len(lengths)
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		a += intrinsics.unaligned_load((^simd.u8x16)(&INFLATE_ONE_HOT[16 - int(p[i])]))
+		b += intrinsics.unaligned_load((^simd.u8x16)(&INFLATE_ONE_HOT[16 - int(p[i + 1])]))
+	}
+	if i < n {
+		a += intrinsics.unaligned_load((^simd.u8x16)(&INFLATE_ONE_HOT[16 - int(p[i])]))
+	}
+	intrinsics.unaligned_store((^#simd[16]i32)(counts), cast(#simd[16]i32)a + cast(#simd[16]i32)b)
 }
 
 @(private)
@@ -357,9 +383,7 @@ inflate_build :: proc(table: []u32, lengths: []u8, table_bits, maxlen, bad_symbo
 	builder.length = 1
 	symbol_count := i32(len(lengths))
 
-	for i = 0; i < symbol_count; i += 1 {
-		counts[lengths[i]] += 1
-	}
+	inflate_count_lengths(&counts, lengths)
 	offsets[1] = counts[0]
 	for i = 1; i < maxlen; i += 1 {
 		offsets[i + 1] = offsets[i] + counts[i]
@@ -431,9 +455,29 @@ inflate_entry :: #force_inline proc(s: ^Inflate, table: []u32, $BITS: u64) -> (e
 	entry = table[s.bit_buffer & ((1 << BITS) - 1)]
 	if intrinsics.expect(entry & INFLATE_ENTRY_SUBTABLE != 0, false) {
 		// sub-table lookup
-		s.bit_buffer >>= BITS
-		s.bit_count  -= i32(BITS)
-		entry = table[u64(entry >> 16) + (s.bit_buffer & ((u64(1) << u64((entry >> 8) & 0xf)) - 1))]
+		entry = inflate_sub_entry(s, table, entry, BITS)
+	}
+	return
+}
+
+@(private)
+inflate_sub_entry :: #force_inline proc(s: ^Inflate, table: []u32, entry: u32, $BITS: u64) -> u32 #no_bounds_check {
+	s.bit_buffer >>= BITS
+	s.bit_count  -= i32(BITS)
+	return table[u64(entry >> 16) + (s.bit_buffer & ((u64(1) << u64((entry >> 8) & 0xf)) - 1))]
+}
+
+@(private)
+inflate_refill_entry :: #force_inline proc(s: ^Inflate, written: int, table: []u32, $BITS: u64, $STREAM: bool) -> (entry: u32, overrun: bool) #no_bounds_check {
+	if intrinsics.expect(s.bit_count >= i32(BITS), true) {
+		entry = table[s.bit_buffer & ((1 << BITS) - 1)]
+		if inflate_refill(s, written, STREAM) { return entry, true }
+	} else {
+		if inflate_refill(s, written, STREAM) { return 0, true }
+		entry = table[s.bit_buffer & ((1 << BITS) - 1)]
+	}
+	if intrinsics.expect(entry & INFLATE_ENTRY_SUBTABLE != 0, false) {
+		entry = inflate_sub_entry(s, table, entry, BITS)
 	}
 	return
 }
@@ -785,8 +829,8 @@ inflate_decompress :: proc(d: ^Inflate_Decoder, output: []u8, grow: ^[dynamic]u8
 					fast_end := capacity - INFLATE_FAST_MARGIN
 				}
 				for written <= fast_end {
-					if inflate_refill(&s, written, STREAM) { return written, General_Error.Stream_Too_Short }
-					entry := inflate_entry(&s, literals[:], 10)
+					entry, overrun := inflate_refill_entry(&s, written, literals[:], 10, STREAM)
+					if overrun { return written, General_Error.Stream_Too_Short }
 					length: int
 					if i32(entry) < 0 {
 						inflate_skip(&s, entry)
