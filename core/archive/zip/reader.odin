@@ -1061,9 +1061,15 @@ _member_read :: proc(m: ^Member, p: []u8) -> (n: int, err: Error) {
 			return 0, _member_finish(m)
 		}
 		want := int(min(i64(len(p)), remaining))
-		if read_err := _section_read_full(&m.section, p[:want]); read_err != nil {
-			m.err = _cipher_error(&m.section, read_err)
-			return 0, m.err
+		if s := &m.section; s.store.memory && s.cipher == nil {
+			m.crc = _crc32_copy(p[:want], s.store.data[s.offset:][:want], m.crc)
+			s.offset += i64(want)
+		} else {
+			if read_err := _section_read_full(s, p[:want]); read_err != nil {
+				m.err = _cipher_error(s, read_err)
+				return 0, m.err
+			}
+			m.crc = hash.crc32(p[:want], m.crc)
 		}
 		n = want
 	case .Inflate, .BZip2, .PPMd, .LZMA, .XZ, .Legacy:
@@ -1093,8 +1099,8 @@ _member_read :: proc(m: ^Member, p: []u8) -> (n: int, err: Error) {
 			m.err = _cipher_error(&m.section, codec_err)
 			return 0, m.err
 		}
+		m.crc = hash.crc32(p[:n], m.crc)
 	}
-	m.crc       = hash.crc32(p[:n], m.crc)
 	m.produced += i64(n)
 	if m.produced > m.size {
 		m.err = _cipher_error(&m.section, Zip_Error.Size_Mismatch)
