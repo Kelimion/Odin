@@ -381,33 +381,50 @@ re_norm :: #force_inline proc(rc: ^Range_Encoder) {
 
 @(private)
 re_bit :: #force_inline proc(rc: ^Range_Encoder, prob: ^u16, bit: u32) {
+	range := rc.range_
+	re_bit_local(rc, &range, prob, bit)
+	rc.range_ = range
+}
+
+@(private)
+re_bit_local :: #force_inline proc(rc: ^Range_Encoder, range: ^u32, prob: ^u16, bit: u32) {
 	ttt   := u32(prob^)
-	bound := (rc.range_ >> NUM_BIT_MODEL_TOTAL_BITS) * ttt
-	if bit == 0 {
-		rc.range_ = bound
-		ttt += (BIT_MODEL_TOTAL - ttt) >> NUM_MOVE_BITS
-	} else {
-		rc.low    += u64(bound)
-		rc.range_ -= bound
-		ttt -= ttt >> NUM_MOVE_BITS
-	}
+	bound := (range^ >> NUM_BIT_MODEL_TOTAL_BITS) * ttt
+	mask  := 0 - bit
+	r     := range^ & mask
+	mask  &= bound
+	r     -= mask
+	rc.low += u64(mask)
+	mask    = bit - 1
+	r      += bound & mask
+	mask   &= BIT_MODEL_TOTAL - ((1 << NUM_MOVE_BITS) - 1)
+	mask   += (1 << NUM_MOVE_BITS) - 1
+	ttt     = u32(i32(ttt) + (i32(mask - ttt) >> NUM_MOVE_BITS))
 	prob^ = u16(ttt)
-	re_norm(rc)
+	if r < TOP_VALUE {
+		r <<= 8
+		range^ = r
+		re_shift_low(rc)
+	} else {
+		range^ = r
+	}
 }
 
 @(private)
 lit_encode :: proc(rc: ^Range_Encoder, probs: [^]u16, sym: u32) #no_bounds_check {
 	sym := sym
 	sym |= 0x100
+	range := rc.range_
 	for {
 		prob := &probs[sym >> 8]
 		bit  := (sym >> 7) & 1
 		sym <<= 1
-		re_bit(rc, prob, bit)
+		re_bit_local(rc, &range, prob, bit)
 		if sym >= 0x10000 {
 			break
 		}
 	}
+	rc.range_ = range
 }
 
 @(private)
@@ -416,17 +433,19 @@ lit_encode_matched :: proc(rc: ^Range_Encoder, probs: [^]u16, sym, match_byte: u
 	sym |= 0x100
 	match_byte := match_byte
 	offs       := u32(0x100)
+	range      := rc.range_
 	for {
 		match_byte <<= 1
 		prob := &probs[offs + (match_byte & offs) + (sym >> 8)]
 		bit  := (sym >> 7) & 1
 		sym <<= 1
 		offs &= ~(match_byte ~ sym)
-		re_bit(rc, prob, bit)
+		re_bit_local(rc, &range, prob, bit)
 		if sym >= 0x10000 {
 			break
 		}
 	}
+	rc.range_ = range
 }
 
 @(private)

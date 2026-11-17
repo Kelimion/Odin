@@ -590,11 +590,30 @@ rc_literal :: #force_inline proc "contextless" (rc: ^Rc, prob: [^]u16, $CHECKED:
 
 @(private)
 rc_tree :: #force_inline proc "contextless" (rc: ^Rc, probs: [^]u16, $BITS: u32, $CHECKED: bool) -> (symbol: u32) #no_bounds_check {
-	symbol = 1
-	for _ in 0..<BITS {
-		symbol = (symbol << 1) | rc_bit_select(rc, &probs[symbol], CHECKED)
+	symbol   = 1
+	current := u32(probs[1])
+	for _ in 0..<BITS - 1 {
+		next  := symbol << 1
+		zero  := u32(probs[next])
+		one_p := u32(probs[next + 1])
+		rc_normalize(rc, CHECKED)
+		bound := (rc.range_ >> NUM_BIT_MODEL_TOTAL_BITS) * current
+		one   := rc.code >= bound
+		rc.range_ = rc.range_ - bound if one else bound
+		rc.code   = rc.code - bound if one else rc.code
+		target   := i32(LZMA_PROB_ONE_TARGET) if one else i32(BIT_MODEL_TOTAL)
+		probs[symbol] = u16(i32(current) + ((target - i32(current)) >> NUM_MOVE_BITS))
+		symbol  = next + u32(one)
+		current = one_p if one else zero
 	}
-	return symbol - (1 << BITS)
+	rc_normalize(rc, CHECKED)
+	bound := (rc.range_ >> NUM_BIT_MODEL_TOTAL_BITS) * current
+	one   := rc.code >= bound
+	rc.range_ = rc.range_ - bound if one else bound
+	rc.code   = rc.code - bound if one else rc.code
+	target   := i32(LZMA_PROB_ONE_TARGET) if one else i32(BIT_MODEL_TOTAL)
+	probs[symbol] = u16(i32(current) + ((target - i32(current)) >> NUM_MOVE_BITS))
+	return (symbol << 1) + u32(one) - (1 << BITS)
 }
 
 @(private)
@@ -689,16 +708,22 @@ decode_real :: proc(d: ^Decoder, rc_ptr: ^Rc, o: ^Output, limit, safe: int, $CHE
 				state -= state if state < 4 else 3
 				symbol = rc_literal(&rc, prob, CHECKED)
 			} else {
-				match_byte := u32(out[pos - int(rep0)])
-				offs       := u32(0x100)
-				state      -= 3 if state < 10 else 6
+				m     := u32(out[pos - int(rep0)]) << 1
+				offs  := u32(0x100)
+				index := (offs & m) + offs + 1
+				state -= 3 if state < 10 else 6
 				for _ in 0..<8 {
-					match_byte <<= 1
-					bit  := offs
-					offs &= match_byte
-					b    := rc_bit_select(&rc, &prob[offs + bit + symbol], CHECKED)
-					symbol = (symbol << 1) | b
-					offs ~= bit & (b - 1)
+					m2 := m << 1
+					om := offs & m
+					o0 := offs ~ om
+					s0 := symbol << 1
+					i0 := (o0 & m2) + o0 + s0
+					i1 := (om & m2) + om + s0 + 1
+					b  := rc_bit_select(&rc, &prob[index], CHECKED)
+					symbol = s0 + b
+					offs   = om if b != 0 else o0
+					index  = i1 if b != 0 else i0
+					m      = m2
 				}
 			}
 			out[pos] = u8(symbol)
