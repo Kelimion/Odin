@@ -17,6 +17,9 @@ Stall_Reader :: struct {
 	data:     []byte,
 	position: int,
 	fail:     io.Error,
+	chunk:    int,
+	hiccups:  int,
+	pending:  int,
 }
 
 stall_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
@@ -24,7 +27,16 @@ stall_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset:
 	#partial switch mode {
 	case .Read:
 		if r.position < len(r.data) {
-			count := copy(p, r.data[r.position:])
+			if r.pending < r.hiccups {
+				r.pending += 1
+				return 0, nil
+			}
+			r.pending = 0
+			limit := len(r.data) - r.position
+			if r.chunk > 0 {
+				limit = min(limit, r.chunk)
+			}
+			count := copy(p, r.data[r.position:][:limit])
 			r.position += count
 			return i64(count), nil
 		}
@@ -213,6 +225,33 @@ compress_context_refill_stall_and_error :: proc(t: ^testing.T) {
 	defer compress.destroy_context(&ectx)
 	testing.expect_value(t, compress.refill_window(&ectx, 11), io.Error.Unknown)
 	testing.expect(t, bytes.equal(ectx.window, data))
+}
+
+@(test)
+compress_context_refill_hiccups :: proc(t: ^testing.T) {
+	data := pattern_data(1000)
+	defer delete(data)
+
+	hiccup := Stall_Reader{data = data, fail = .EOF, chunk = 1, hiccups = 3}
+	ctx := compress.init_context(stall_stream(&hiccup))
+	defer compress.destroy_context(&ctx)
+	testing.expect(t, compress.refill_window(&ctx, 500) == nil)
+	testing.expect(t, len(ctx.window) >= 500 && bytes.equal(ctx.window[:500], data[:500]))
+
+	rest, err := compress.read_remaining(&ctx)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, bytes.equal(rest[:], data))
+	delete(rest)
+
+	stuck := Stall_Reader{data = data, fail = .EOF, chunk = 1, hiccups = 101}
+	sctx := compress.init_context(stall_stream(&stuck))
+	defer compress.destroy_context(&sctx)
+	testing.expect_value(t, compress.refill_window(&sctx, 1), io.Error.No_Progress)
+
+	srest, serr := compress.read_remaining(&sctx)
+	testing.expect_value(t, serr, io.Error.No_Progress)
+	testing.expect(t, bytes.equal(srest[:], data[:1]))
+	delete(srest)
 }
 
 @(test)

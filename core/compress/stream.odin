@@ -135,6 +135,8 @@ refill_window :: proc(z: ^Context, need: int) -> (err: io.Error) #no_bounds_chec
 				err = .No_Progress
 				break
 			}
+		} else {
+			stalled = 0
 		}
 	}
 
@@ -397,6 +399,8 @@ read_remaining :: proc(z: ^Context, allocator := context.allocator) -> (data: [d
 			if stalled > 100 {
 				return data, .No_Progress
 			}
+		} else {
+			stalled = 0
 		}
 	}
 }
