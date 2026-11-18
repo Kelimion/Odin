@@ -38,9 +38,7 @@ reader_init :: proc(r: ^Reader, z: ^compress.Context, flags := Decode_Flags{}, e
 	r.size      = compress.declared_size(expected_output_size)
 	r.total_in  = -1
 	defer r.err = err
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
-		return General_Error.Incompatible_Options
-	}
+	_check_options(options) or_return
 	if options.max_output_size > 0 && r.size > options.max_output_size {
 		return General_Error.Output_Too_Short
 	}
@@ -140,9 +138,7 @@ writer_init :: proc(xw: ^Writer, w: io.Writer, level := Level.Default, xz_option
 	defer if err != nil {
 		writer_destroy(xw)
 	}
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
-		return General_Error.Incompatible_Options
-	}
+	_check_options(options) or_return
 	xw.opts        = _resolve(level, xz_options) or_return
 	xw.check       = xw.opts.check.? or_else .CRC64
 	xw.next_report = i64(compress.progress_interval(options))

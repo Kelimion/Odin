@@ -7,20 +7,23 @@ decompress        :: proc{decompress_from_bytes, decompress_from_context}
 decompress_raw    :: proc{decompress_raw_from_bytes, decompress_raw_from_context}
 decompress_lzma2  :: proc{decompress_lzma2_from_bytes, decompress_lzma2_from_context}
 
-decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return decompress_from_context(&ctx, expected_output_size, max_output_size, allocator)
+	return decompress_from_context(&ctx, expected_output_size, options, allocator)
 }
 
-decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if z.output == nil || max_output_size < 0 {
+	if z.output == nil {
 		return General_Error.Incompatible_Options
 	}
+	check_options(options) or_return
+	max_output_size := compress.output_limit(options)
 	if expected_output_size > max_output_size {
 		return General_Error.Output_Too_Short
 	}
+	total_in := progress_total_in(z, options)
 	header: [HEADER_SIZE]u8
 	if compress.read_slice(z, header[:]) != nil {
 		return General_Error.Stream_Too_Short
@@ -43,53 +46,62 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 	} else if expected_output_size >= 0 {
 		declared = expected_output_size
 	}
-	return decompress_lzma(z, props, declared, max_output_size)
+	return decompress_lzma(z, props, declared, options, total_in, HEADER_SIZE)
 }
 
-decompress_raw_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, props: Properties, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_raw_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, props: Properties, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return decompress_raw_from_context(&ctx, props, expected_output_size, max_output_size, allocator)
+	return decompress_raw_from_context(&ctx, props, expected_output_size, options, allocator)
 }
 
-decompress_raw_from_context :: proc(z: ^compress.Context, props: Properties, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_raw_from_context :: proc(z: ^compress.Context, props: Properties, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if z.output == nil || max_output_size < 0 {
+	if z.output == nil {
 		return General_Error.Incompatible_Options
 	}
+	check_options(options) or_return
 	if !valid_properties(props) {
 		return LZMA_Error.Invalid_Properties
 	}
 	expected := compress.declared_size(expected_output_size)
-	if expected > max_output_size {
+	if expected > compress.output_limit(options) {
 		return General_Error.Output_Too_Short
 	}
-	return decompress_lzma(z, props, expected, max_output_size)
+	return decompress_lzma(z, props, expected, options, progress_total_in(z, options), 0)
 }
 
-decompress_lzma2_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, dict_size: u32, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_lzma2_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, dict_size: u32, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return decompress_lzma2_from_context(&ctx, dict_size, expected_output_size, max_output_size, allocator)
+	return decompress_lzma2_from_context(&ctx, dict_size, expected_output_size, options, allocator)
 }
 
-decompress_lzma2_from_context :: proc(z: ^compress.Context, dict_size: u32, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_lzma2_from_context :: proc(z: ^compress.Context, dict_size: u32, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if z.output == nil || max_output_size < 0 {
+	if z.output == nil {
 		return General_Error.Incompatible_Options
 	}
+	check_options(options) or_return
 	expected := compress.declared_size(expected_output_size)
-	if expected > max_output_size {
+	if expected > compress.output_limit(options) {
 		return General_Error.Output_Too_Short
 	}
+	if probs_memory(LZMA2_LCLP_MAX) > compress.memory_limit(options) {
+		return General_Error.Memory_Limit_Exceeded
+	}
+	total_in := progress_total_in(z, options)
 
 	d: Decoder
 	decoder_init(&d, Properties{lc = LZMA2_LCLP_MAX, dict_size = dict_size}) or_return
 	defer delete(d.probs)
 
-	o := output_begin(z, expected, max_output_size)
+	o := output_begin(z, expected, compress.output_limit(options))
 	defer output_end(z, &o)
-	return lzma2_run(&d, z, &o, expected)
+	p: Output_Progress
+	o.progress = progress_begin(&p, options, total_in, 0, expected, 0)
+	lzma2_run(&d, z, &o, expected) or_return
+	return progress_finish(&d, &o)
 }
 
 lzma2_decoder_init :: proc(dec: ^LZMA2_Decoder, allocator := context.allocator) {
@@ -101,15 +113,21 @@ lzma2_decoder_destroy :: proc(dec: ^LZMA2_Decoder) {
 	dec^ = {}
 }
 
-decompress_lzma2_append :: proc(dec: ^LZMA2_Decoder, output: ^[dynamic]u8, input: []u8, dict_size: u32, expected_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX) -> (consumed: int, err: Error) {
+decompress_lzma2_append :: proc(dec: ^LZMA2_Decoder, output: ^[dynamic]u8, input: []u8, dict_size: u32, expected_output_size := -1, options: compress.Options = {}) -> (consumed: int, err: Error) {
+	check_options(options) or_return
+	max_output_size := compress.output_limit(options)
 	start := len(output)
-	if max_output_size < 0 || start > max_output_size {
+	if start > max_output_size {
 		return 0, General_Error.Output_Too_Short
 	}
+	expected_size := compress.declared_size(expected_output_size)
 	if expected_size > max_output_size - start {
 		return 0, General_Error.Output_Too_Short
 	}
 	if dec.probs == nil {
+		if probs_memory(LZMA2_LCLP_MAX) > compress.memory_limit(options) {
+			return 0, General_Error.Memory_Limit_Exceeded
+		}
 		dec.probs = make([]u16, NUM_BASE_PROBS + int(LITERAL_CODER_SIZE) << uint(LZMA2_LCLP_MAX), dec.allocator) or_return
 	}
 	d := Decoder{
@@ -132,7 +150,12 @@ decompress_lzma2_append :: proc(dec: ^LZMA2_Decoder, output: ^[dynamic]u8, input
 		}
 	}
 	size := start + expected_size if expected_size >= 0 else -1
+	p: Output_Progress
+	o.progress = progress_begin(&p, options, i64(len(input)), 0, size, start)
 	err = lzma2_run(&d, &ctx, &o, size)
+	if err == nil {
+		err = progress_finish(&d, &o)
+	}
 	non_zero_resize(output, o.written)
 	return len(input) - len(ctx.window), err
 }
@@ -164,11 +187,12 @@ Rc :: struct {
 
 @(private)
 Output :: struct {
-	buf:     ^[dynamic]u8,
-	written: int,
-	limit:   int,
-	base:    int,
-	end:     int,
+	buf:      ^[dynamic]u8,
+	written:  int,
+	limit:    int,
+	base:     int,
+	end:      int,
+	progress: ^Output_Progress,
 }
 
 @(private)
@@ -188,10 +212,15 @@ LZMA2_State :: struct {
 }
 
 @(private)
-decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, max_output_size: int) -> (err: Error) {
+decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, options: compress.Options, total_in, base_in: i64) -> (err: Error) {
+	if probs_memory(int(props.lc) + int(props.lp)) > compress.memory_limit(options) {
+		return General_Error.Memory_Limit_Exceeded
+	}
 	d: Decoder
-	o := output_begin(z, size, max_output_size)
+	o := output_begin(z, size, compress.output_limit(options))
 	defer output_end(z, &o)
+	p: Output_Progress
+	o.progress = progress_begin(&p, options, total_in, base_in, size, 0)
 
 	rc_init(&d, z) or_return
 	decoder_init(&d, props, int(props.lc) + int(props.lp)) or_return
@@ -201,7 +230,50 @@ decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, max_
 	target := size if size >= 0 else o.end
 	packed := -1
 	eos    := decode_segment(&d, z, &o, target, &packed) or_return
-	return lzma_finish(&d, z, &o, size, eos)
+	lzma_finish(&d, z, &o, size, eos) or_return
+	return progress_finish(&d, &o)
+}
+
+@(private)
+probs_memory :: #force_inline proc "contextless" (lc_lp: int) -> (size: int) {
+	return (NUM_BASE_PROBS + LITERAL_CODER_SIZE << uint(lc_lp)) * size_of(u16)
+}
+
+@(private)
+progress_total_in :: proc(z: ^compress.Context, options: compress.Options) -> (total_in: i64) {
+	if options.progress == nil {
+		return -1
+	}
+	return i64(compress.input_size(z))
+}
+
+@(private)
+progress_begin :: proc "contextless" (p: ^Output_Progress, options: compress.Options, total_in, base_in: i64, total_out, start: int) -> (progress: ^Output_Progress) {
+	if options.progress == nil {
+		return nil
+	}
+	interval := compress.progress_interval(options)
+	p^ = {options = options, base_in = base_in, total_in = total_in, total_out = i64(total_out), interval = interval, mark = max(int)}
+	if interval <= max(int) - start {
+		p.mark = (start / interval + 1) * interval
+	}
+	return p
+}
+
+@(private)
+progress_report :: proc(d: ^Decoder, o: ^Output) -> (err: Error) {
+	p   := o.progress
+	pos := o.base + o.written
+	p.mark = pos + p.interval if p.interval <= max(int) - pos else max(int)
+	return compress.report_progress(p.options, p.base_in + d.consumed, i64(pos), p.total_in, p.total_out)
+}
+
+@(private)
+progress_finish :: proc(d: ^Decoder, o: ^Output) -> (err: Error) {
+	if o.progress != nil && o.base + o.written >= o.progress.mark {
+		return progress_report(d, o)
+	}
+	return nil
 }
 
 @(private)
@@ -246,7 +318,13 @@ lzma2_fill :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, s: ^LZMA2_Stat
 				if o.written >= o.limit {
 					return nil
 				}
+				if o.progress != nil && o.base + o.written >= o.progress.mark {
+					progress_report(d, o) or_return
+				}
 				n := min(s.chunk_end - o.base - o.written, o.limit - o.written)
+				if o.progress != nil {
+					n = min(n, o.progress.mark - o.base - o.written)
+				}
 				output_ensure(o, o.written + n) or_return
 				if compress.read_slice(z, o.buf^[o.written:][:n]) != nil {
 					return General_Error.Stream_Too_Short
@@ -458,12 +536,23 @@ decode_segment :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, limit: int
 	memory := compress.is_memory_context(z)
 	for {
 		phys := limit - o.base
-		write_remaining(d, o, min(phys, o.limit)) or_return
+		stop := min(phys, o.limit)
+		if o.progress != nil {
+			stop = min(stop, o.progress.mark - o.base)
+		}
+		write_remaining(d, o, stop) or_return
 		if o.written >= phys || o.written >= o.limit {
 			return false, nil
 		}
+		if o.progress != nil && o.base + o.written >= o.progress.mark {
+			progress_report(d, o) or_return
+			continue
+		}
 		output_ensure(o, o.written + 1) or_return
 		cur_limit := min(len(o.buf^), phys)
+		if o.progress != nil {
+			cur_limit = min(cur_limit, o.progress.mark - o.base)
+		}
 		if d.check_dict == 0 {
 			rem := uint(d.dict_size - d.processed)
 			if uint(cur_limit - o.written) > rem {

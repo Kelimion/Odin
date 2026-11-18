@@ -41,7 +41,7 @@ zlib_test :: proc(t: ^testing.T) {
 	}
 
 	buf: [dynamic]byte
-	err := deflate.inflate_zlib(&buf, ODIN_DEMO)
+	err := deflate.decompress_zlib(&buf, ODIN_DEMO)
 
 	testing.expect(t, err == nil, "ZLIB failed to decompress ODIN_DEMO")
 	s := string(buf[:])
@@ -71,7 +71,7 @@ gzip_test :: proc(t: ^testing.T) {
 	}
 
 	buf: [dynamic]byte
-	err := deflate.inflate_gzip(&buf, TEST)
+	err := deflate.decompress_gzip(&buf, TEST)
 
 	testing.expect(t, err == nil, "GZIP failed to decompress TEST")
 	testing.expect(t, string(buf[:]) == "payload", "GZIP result wasn't 'payload'")
@@ -95,9 +95,9 @@ expect_slice_fails :: proc(t: ^testing.T, name, kept: string, format: Deflate_Fo
 	buf: [dynamic]byte
 	err: compress.Error
 	switch format {
-	case .Raw:  err = deflate.inflate_raw(&buf, data)
-	case .ZLIB: err = deflate.inflate_zlib(&buf, data)
-	case .GZIP: err = deflate.inflate_gzip(&buf, data)
+	case .Raw:  err = deflate.decompress_raw(&buf, data)
+	case .ZLIB: err = deflate.decompress_zlib(&buf, data)
+	case .GZIP: err = deflate.decompress_gzip(&buf, data)
 	}
 	delete(buf)
 	testing.expectf(t, err != nil, "%v, %v: %v %v of %v bytes decompressed without error", name, format, kept, len(data), full)

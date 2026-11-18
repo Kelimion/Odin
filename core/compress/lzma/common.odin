@@ -84,6 +84,16 @@ Stream_Kind :: enum u8 {
 	LZMA2,
 }
 
+@(private)
+Output_Progress :: struct {
+	options:   compress.Options,
+	base_in:   i64,
+	total_in:  i64,
+	total_out: i64,
+	interval:  int,
+	mark:      int,
+}
+
 LZMA2_Decoder :: struct {
 	probs:     []u16,
 	allocator: runtime.Allocator,
@@ -538,4 +548,12 @@ num_probs :: #force_inline proc "contextless" (lc, lp: u8) -> int {
 @(private)
 valid_properties :: proc "contextless" (props: Properties) -> bool {
 	return props.lc <= LC_MAX && props.lp <= LP_MAX && props.pb <= PB_MAX
+}
+
+@(private)
+check_options :: proc "contextless" (options: compress.Options) -> (err: Error) {
+	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
+		return General_Error.Incompatible_Options
+	}
+	return nil
 }

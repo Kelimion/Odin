@@ -10,11 +10,13 @@ import "core:io"
 
 decompress :: proc{decompress_from_bytes, decompress_from_context}
 
-decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, flags := Decode_Flags{}, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, flags := Decode_Flags{}, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if output == nil || max_output_size < 0 {
+	if output == nil {
 		return General_Error.Incompatible_Options
 	}
+	_check_options(options) or_return
+	max_output_size := compress.output_limit(options)
 	expected := compress.declared_size(expected_output_size)
 	if expected > max_output_size {
 		return General_Error.Output_Too_Short
@@ -24,6 +26,9 @@ decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, flags := Decode
 		output          = output,
 		flags           = flags,
 		max_output_size = expected if expected >= 0 else max_output_size,
+		max_memory      = compress.memory_limit(options),
+		total_out       = expected,
+		options         = options,
 	}
 	lzma.lzma2_decoder_init(&d.lzma2, allocator)
 	defer lzma.lzma2_decoder_destroy(&d.lzma2)
@@ -38,16 +43,24 @@ decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, flags := Decode
 	return
 }
 
-decompress_from_context :: proc(z: ^compress.Context, flags := Decode_Flags{}, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+decompress_from_context :: proc(z: ^compress.Context, flags := Decode_Flags{}, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	if z.output == nil {
 		return General_Error.Incompatible_Options
 	}
 	if compress.is_memory_context(z) {
 		input := z.window
-		err = decompress_from_bytes(z.output, input, flags, expected_output_size, max_output_size, allocator)
+		err = decompress_from_bytes(z.output, input, flags, expected_output_size, options, allocator)
 		z.window        = z.window[len(z.window):]
 		z.bytes_written = i64(len(z.output^))
 		return
+	}
+	_check_options(options) or_return
+	if compress.declared_size(expected_output_size) > compress.output_limit(options) {
+		return General_Error.Output_Too_Short
+	}
+	limit := compress.memory_limit(options)
+	if len(z.window) > limit {
+		return General_Error.Memory_Limit_Exceeded
 	}
 	buffer := make([dynamic]u8, 0, len(z.window), allocator) or_return
 	defer delete(buffer)
@@ -56,6 +69,13 @@ decompress_from_context :: proc(z: ^compress.Context, flags := Decode_Flags{}, e
 	chunk: [64 * 1024]u8
 	for {
 		n, read_err := io.read(z.input, chunk[:])
+		if n > limit - len(buffer) {
+			return General_Error.Memory_Limit_Exceeded
+		}
+		if len(buffer) + n > cap(buffer) {
+			grow := min(cap(buffer), limit - cap(buffer))
+			reserve(&buffer, min(max(len(buffer) + n, len(chunk), cap(buffer) + grow), limit)) or_return
+		}
 		append(&buffer, ..chunk[:n]) or_return
 		if read_err == .EOF {
 			break
@@ -64,7 +84,9 @@ decompress_from_context :: proc(z: ^compress.Context, flags := Decode_Flags{}, e
 			return read_err
 		}
 	}
-	err = decompress_from_bytes(z.output, buffer[:], flags, expected_output_size, max_output_size, allocator)
+	inner := options
+	inner.max_memory = max(limit - len(buffer), 1)
+	err = decompress_from_bytes(z.output, buffer[:], flags, expected_output_size, inner, allocator)
 	z.bytes_written = i64(len(z.output^))
 	return
 }
@@ -76,6 +98,10 @@ Decoder :: struct {
 	output:           ^[dynamic]u8,
 	flags:            Decode_Flags,
 	max_output_size:  int,
+	max_memory:       int,
+	total_out:        int,
+	options:          compress.Options,
+	data_start:       int,
 	lzma2:            lzma.LZMA2_Decoder,
 	check_id:         u8,
 	stream_flags:     [2]u8,
@@ -258,16 +284,32 @@ _decode_block :: proc(d: ^Decoder) -> (unpadded, uncompressed_size: u64, err: Er
 		data = data[:int(compressed)]
 	}
 	start    := len(d.output^)
+	room     := d.max_output_size - start
 	expected := -1
 	if has_uncompressed {
-		if uncompressed > u64(d.max_output_size - start) {
+		if uncompressed > u64(room) {
 			return 0, 0, General_Error.Output_Too_Short
 		}
 		expected = int(uncompressed)
+	} else if room == 0 {
+		expected = 0
 	}
-	consumed, lzma_err := lzma.decompress_lzma2_append(&d.lzma2, d.output, data, dict_size, expected, d.max_output_size)
+	inner := compress.Options{max_output_size = d.max_output_size, max_memory = d.max_memory}
+	if d.options.progress != nil {
+		inner.progress          = _decode_progress
+		inner.progress_data     = d
+		inner.progress_interval = d.options.progress_interval
+		d.data_start            = data_start
+	}
+	consumed, lzma_err := lzma.decompress_lzma2_append(&d.lzma2, d.output, data, dict_size, expected, inner)
 	if lzma_err != nil {
-		if (expected >= 0 && lzma_err == General_Error.Output_Too_Short) || (has_compressed && lzma_err == General_Error.Stream_Too_Short) {
+		if has_uncompressed && lzma_err == General_Error.Output_Too_Short {
+			return 0, 0, General_Error.Size_Mismatch
+		}
+		if !has_uncompressed && expected == 0 && lzma_err == General_Error.Size_Mismatch {
+			return 0, 0, General_Error.Output_Too_Short
+		}
+		if has_compressed && lzma_err == General_Error.Stream_Too_Short {
 			return 0, 0, General_Error.Size_Mismatch
 		}
 		return 0, 0, lzma_err
@@ -299,6 +341,12 @@ _decode_block :: proc(d: ^Decoder) -> (unpadded, uncompressed_size: u64, err: Er
 	}
 
 	return u64(header_size + consumed + check_size), u64(len(out)), nil
+}
+
+@(private)
+_decode_progress :: proc(progress: compress.Progress, user_data: rawptr) -> (cancel: bool) {
+	d := (^Decoder)(user_data)
+	return compress.report_progress(d.options, i64(d.data_start) + progress.bytes_in, progress.bytes_out, i64(len(d.input)), i64(d.total_out)) != nil
 }
 
 @(private)

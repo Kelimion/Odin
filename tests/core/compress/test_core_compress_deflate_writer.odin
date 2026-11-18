@@ -7,7 +7,7 @@ import "core:io"
 import "core:math/rand"
 import "core:testing"
 
-DEFLATE_WRITER_FORMATS :: [?]deflate.Deflate_Format{.Raw, .Zlib, .Gzip, .Raw64}
+DEFLATE_WRITER_FORMATS :: [?]deflate.Format{.Raw, .Zlib, .Gzip, .Raw64}
 DEFLATE_WRITER_SYNC    :: [4]byte{0x00, 0x00, 0xff, 0xff}
 
 @(test)
@@ -74,7 +74,7 @@ deflate_writer_large :: proc(t: ^testing.T) {
 	d64_test_data(3, 2 << 20 if !SLIM_TESTS else 600_000, &mixed)
 
 	for input in ([][]byte{text, mixed[:]}) {
-		for format in ([]deflate.Deflate_Format{.Raw, .Raw64}) {
+		for format in ([]deflate.Format{.Raw, .Raw64}) {
 			for level in ([]deflate.Deflate_Level{.Stored, .Level_1, .Level_2, .Level_6}) {
 				deflate_writer_check(t, "large", format, input, level, .Random, {chunk_size = 1})
 				deflate_writer_check(t, "large", format, input, level, .Edges, {chunk_size = 70_000})
@@ -115,19 +115,19 @@ deflate_writer_flush_round_trip :: proc(t: ^testing.T) {
 		packed: [dynamic]byte
 		defer delete(packed)
 		aw := Append_Writer{out = &packed, fail_at = -1}
-		dw: deflate.Deflate_Writer
-		defer deflate.deflate_writer_destroy(&dw)
-		testing.expect_value(t, deflate.deflate_writer_init(&dw, append_writer(&aw), format), nil)
-		testing.expect_value(t, deflate.deflate_writer_flush(&dw), nil)
+		dw: deflate.Writer
+		defer deflate.writer_destroy(&dw)
+		testing.expect_value(t, deflate.writer_init(&dw, append_writer(&aw), format), nil)
+		testing.expect_value(t, deflate.writer_flush(&dw), nil)
 		testing.expectf(t, deflate_writer_synced(packed[:]), "%v: empty flush gave %v", format, packed[:])
-		_, err := deflate.deflate_writer_write(&dw, match[:1000])
+		_, err := deflate.writer_write(&dw, match[:1000])
 		testing.expect_value(t, err, nil)
-		testing.expect_value(t, deflate.deflate_writer_flush(&dw), nil)
+		testing.expect_value(t, deflate.writer_flush(&dw), nil)
 		testing.expectf(t, deflate_writer_synced(packed[:]), "%v: flush did not end on a sync marker", format)
-		_, err = deflate.deflate_writer_write(&dw, match[1000:])
+		_, err = deflate.writer_write(&dw, match[1000:])
 		testing.expect_value(t, err, nil)
-		testing.expect_value(t, deflate.deflate_writer_flush(&dw), nil)
-		testing.expect_value(t, deflate.deflate_writer_finish(&dw), nil)
+		testing.expect_value(t, deflate.writer_flush(&dw), nil)
+		testing.expect_value(t, deflate.writer_finish(&dw), nil)
 
 		output: [dynamic]byte
 		defer delete(output)
@@ -159,9 +159,9 @@ deflate_writer_failures :: proc(t: ^testing.T) {
 			sink: [dynamic]byte
 			defer delete(sink)
 			aw := Append_Writer{out = &sink, fail_at = -1}
-			dw: deflate.Deflate_Writer
-			err := deflate.deflate_writer_init(&dw, append_writer(&aw), format, .Level_1, options)
-			deflate.deflate_writer_destroy(&dw)
+			dw: deflate.Writer
+			err := deflate.writer_init(&dw, append_writer(&aw), format, .Level_1, options)
+			deflate.writer_destroy(&dw)
 			testing.expectf(t, err == compress.General_Error.Incompatible_Options, "%v, %v: %v", format, options, err)
 		}
 
@@ -169,9 +169,9 @@ deflate_writer_failures :: proc(t: ^testing.T) {
 			sink: [dynamic]byte
 			defer delete(sink)
 			aw := Append_Writer{out = &sink, fail_at = -1}
-			dw: deflate.Deflate_Writer
-			err := deflate.deflate_writer_init(&dw, append_writer(&aw), format, .Level_1, {max_memory = 500_000})
-			deflate.deflate_writer_destroy(&dw)
+			dw: deflate.Writer
+			err := deflate.writer_init(&dw, append_writer(&aw), format, .Level_1, {max_memory = 500_000})
+			deflate.writer_destroy(&dw)
 			testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded, "%v: %v", format, err)
 		}
 
@@ -179,16 +179,16 @@ deflate_writer_failures :: proc(t: ^testing.T) {
 			sink: [dynamic]byte
 			defer delete(sink)
 			aw := Append_Writer{out = &sink, fail_at = -1}
-			dw: deflate.Deflate_Writer
-			defer deflate.deflate_writer_destroy(&dw)
-			testing.expect_value(t, deflate.deflate_writer_init(&dw, append_writer(&aw), format, .Level_6), nil)
-			_, err := deflate.deflate_writer_write(&dw, data[:100])
+			dw: deflate.Writer
+			defer deflate.writer_destroy(&dw)
+			testing.expect_value(t, deflate.writer_init(&dw, append_writer(&aw), format, .Level_6), nil)
+			_, err := deflate.writer_write(&dw, data[:100])
 			testing.expect_value(t, err, nil)
-			testing.expect_value(t, deflate.deflate_writer_finish(&dw), nil)
-			testing.expect_value(t, deflate.deflate_writer_finish(&dw), nil)
-			n, again := deflate.deflate_writer_write(&dw, data[:1])
+			testing.expect_value(t, deflate.writer_finish(&dw), nil)
+			testing.expect_value(t, deflate.writer_finish(&dw), nil)
+			n, again := deflate.writer_write(&dw, data[:1])
 			testing.expectf(t, n == 0 && again == io.Error.Closed, "%v: write after finish gave %v, %v", format, n, again)
-			testing.expect_value(t, deflate.deflate_writer_flush(&dw), compress.Error(io.Error.Closed))
+			testing.expect_value(t, deflate.writer_flush(&dw), compress.Error(io.Error.Closed))
 		}
 	}
 
@@ -196,9 +196,9 @@ deflate_writer_failures :: proc(t: ^testing.T) {
 		sink: [dynamic]byte
 		defer delete(sink)
 		aw := Append_Writer{out = &sink, fail_at = -1}
-		dw: deflate.Deflate_Writer
-		testing.expect_value(t, deflate.deflate_writer_init(&dw, append_writer(&aw), deflate.Deflate_Format(9)), compress.Error(compress.General_Error.Incompatible_Options))
-		deflate.deflate_writer_destroy(&dw)
+		dw: deflate.Writer
+		testing.expect_value(t, deflate.writer_init(&dw, append_writer(&aw), deflate.Format(9)), compress.Error(compress.General_Error.Incompatible_Options))
+		deflate.writer_destroy(&dw)
 	}
 	free_all(context.temp_allocator)
 }
@@ -222,19 +222,19 @@ deflate_writer_buffer :: proc(t: ^testing.T) {
 			output: [dynamic]byte
 			defer delete(output)
 			aw := Append_Writer{out = &output, fail_at = -1}
-			dw: deflate.Deflate_Writer
-			testing.expect_value(t, deflate.deflate_writer_init(&dw, append_writer(&aw), format, level, {buffer = buffer}), nil)
+			dw: deflate.Writer
+			testing.expect_value(t, deflate.writer_init(&dw, append_writer(&aw), format, level, {buffer = buffer}), nil)
 			testing.expect_value(t, raw_data(dw.window), raw_data(buffer))
 			testing.expect_value(t, len(dw.window), size)
 			rest := text
 			for len(rest) > 0 {
 				k := min(len(rest), 1 + rand.int_max(100_000))
-				_, err := deflate.deflate_writer_write(&dw, rest[:k])
+				_, err := deflate.writer_write(&dw, rest[:k])
 				testing.expect_value(t, err, nil)
 				rest = rest[k:]
 			}
-			testing.expect_value(t, deflate.deflate_writer_finish(&dw), nil)
-			deflate.deflate_writer_destroy(&dw)
+			testing.expect_value(t, deflate.writer_finish(&dw), nil)
+			deflate.writer_destroy(&dw)
 			testing.expectf(t, bytes.equal(output[:], want[:]), "%v, level %v: %v vs %v bytes", format, level, len(output), len(want))
 		}
 	}
@@ -253,10 +253,10 @@ deflate_writer_as_stream :: proc(t: ^testing.T) {
 		output: [dynamic]byte
 		defer delete(output)
 		aw := Append_Writer{out = &output, fail_at = -1}
-		dw := new(deflate.Deflate_Writer)
+		dw := new(deflate.Writer)
 		defer free(dw)
-		testing.expect_value(t, deflate.deflate_writer_init(dw, append_writer(&aw), format, .Level_5), nil)
-		stream := deflate.deflate_writer_to_stream(dw)
+		testing.expect_value(t, deflate.writer_init(dw, append_writer(&aw), format, .Level_5), nil)
+		stream := deflate.writer_to_stream(dw)
 		testing.expect_value(t, io.query(stream), io.Stream_Mode_Set{.Write, .Flush, .Close, .Destroy, .Query})
 		rest := data
 		for len(rest) > 0 {
@@ -272,8 +272,8 @@ deflate_writer_as_stream :: proc(t: ^testing.T) {
 		flushed: [dynamic]byte
 		defer delete(flushed)
 		fw := Append_Writer{out = &flushed, fail_at = -1}
-		testing.expect_value(t, deflate.deflate_writer_init(dw, append_writer(&fw), format, .Level_5), nil)
-		stream = deflate.deflate_writer_to_stream(dw)
+		testing.expect_value(t, deflate.writer_init(dw, append_writer(&fw), format, .Level_5), nil)
+		stream = deflate.writer_to_stream(dw)
 		_, err := io.write(stream, data[:5000])
 		testing.expect_value(t, err, nil)
 		testing.expect_value(t, io.flush(stream), nil)
@@ -303,31 +303,31 @@ deflate_writer_sizes :: proc(pattern: Write_Pattern, n: int) -> int {
 	return codec_pattern_sizes(pattern, n)
 }
 
-deflate_writer_oneshot :: proc(format: deflate.Deflate_Format, data: []byte, level: deflate.Deflate_Level, output: ^[dynamic]byte) -> compress.Error {
+deflate_writer_oneshot :: proc(format: deflate.Format, data: []byte, level: deflate.Deflate_Level, output: ^[dynamic]byte) -> compress.Error {
 	switch format {
-	case .Raw:   return deflate.deflate_raw(output, data, level)
-	case .Zlib:  return deflate.deflate_zlib(output, data, level)
-	case .Gzip:  return deflate.deflate_gzip(output, data, level)
-	case .Raw64: return deflate.deflate64_raw(output, data, level)
+	case .Raw:   return deflate.compress_raw(output, data, level)
+	case .Zlib:  return deflate.compress_zlib(output, data, level)
+	case .Gzip:  return deflate.compress_gzip(output, data, level)
+	case .Raw64: return deflate.compress_raw64(output, data, level)
 	}
 	return nil
 }
 
-deflate_writer_unpack :: proc(format: deflate.Deflate_Format, input: []byte, output: ^[dynamic]byte) -> compress.Error {
+deflate_writer_unpack :: proc(format: deflate.Format, input: []byte, output: ^[dynamic]byte) -> compress.Error {
 	switch format {
-	case .Raw:   return deflate.inflate_raw_from_bytes(output, input)
-	case .Zlib:  return deflate.inflate_zlib_from_bytes(output, input)
-	case .Gzip:  return deflate.inflate_gzip_from_bytes(output, input)
-	case .Raw64: return deflate.inflate64_raw_from_bytes(output, input)
+	case .Raw:   return deflate.decompress_raw_from_bytes(output, input)
+	case .Zlib:  return deflate.decompress_zlib_from_bytes(output, input)
+	case .Gzip:  return deflate.decompress_gzip_from_bytes(output, input)
+	case .Raw64: return deflate.decompress_raw64_from_bytes(output, input)
 	}
 	return nil
 }
 
-deflate_writer_pack :: proc(w: io.Writer, format: deflate.Deflate_Format, data: []byte, level: deflate.Deflate_Level, pattern: Write_Pattern, options: compress.Options, flushes := false) -> (err: compress.Error) {
-	dw := new(deflate.Deflate_Writer)
+deflate_writer_pack :: proc(w: io.Writer, format: deflate.Format, data: []byte, level: deflate.Deflate_Level, pattern: Write_Pattern, options: compress.Options, flushes := false) -> (err: compress.Error) {
+	dw := new(deflate.Writer)
 	defer free(dw)
-	err = deflate.deflate_writer_init(dw, w, format, level, options)
-	defer deflate.deflate_writer_destroy(dw)
+	err = deflate.writer_init(dw, w, format, level, options)
+	defer deflate.writer_destroy(dw)
 	if err != nil {
 		return
 	}
@@ -335,7 +335,7 @@ deflate_writer_pack :: proc(w: io.Writer, format: deflate.Deflate_Format, data: 
 	for len(rest) > 0 {
 		k := min(deflate_writer_sizes(pattern, len(rest)), len(rest))
 		n: int
-		n, err = deflate.deflate_writer_write(dw, rest[:k])
+		n, err = deflate.writer_write(dw, rest[:k])
 		if err != nil {
 			return
 		}
@@ -344,13 +344,13 @@ deflate_writer_pack :: proc(w: io.Writer, format: deflate.Deflate_Format, data: 
 		}
 		rest = rest[k:]
 		if flushes && rand.int_max(4) == 0 {
-			deflate.deflate_writer_flush(dw) or_return
+			deflate.writer_flush(dw) or_return
 		}
 	}
-	return deflate.deflate_writer_finish(dw)
+	return deflate.writer_finish(dw)
 }
 
-deflate_writer_check :: proc(t: ^testing.T, label: string, format: deflate.Deflate_Format, data: []byte, level: deflate.Deflate_Level, pattern: Write_Pattern, options: compress.Options) {
+deflate_writer_check :: proc(t: ^testing.T, label: string, format: deflate.Format, data: []byte, level: deflate.Deflate_Level, pattern: Write_Pattern, options: compress.Options) {
 	want: [dynamic]byte
 	defer delete(want)
 	testing.expect_value(t, deflate_writer_oneshot(format, data, level, &want), nil)

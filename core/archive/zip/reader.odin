@@ -705,9 +705,9 @@ _extract_payload :: proc(r: ^Reader, index: int, data_offset: i64, w: io.Writer,
 		decode_err: compress.Error
 		#partial switch method {
 		case .Deflate:
-			decode_err = deflate.inflate_raw_to_writer(out, &ctx, expected, options, r.allocator)
+			decode_err = deflate.decompress_raw_to_writer(out, &ctx, expected, options, r.allocator)
 		case .Deflate64:
-			decode_err = deflate.inflate64_raw_to_writer(out, &ctx, expected, options, r.allocator)
+			decode_err = deflate.decompress_raw64_to_writer(out, &ctx, expected, options, r.allocator)
 		case .BZip2:
 			decode_err = bzip2.decompress_to_writer(out, &ctx, expected, options, r.allocator)
 		case .PPMd:
@@ -962,9 +962,9 @@ _member_init :: proc(m: ^Member, r: ^Reader, index: int, data_offset: i64, passw
 		#partial switch method {
 		case .Deflate, .Deflate64:
 			m.mode = .Inflate
-			format := deflate.Inflate_Format.Raw64 if method == .Deflate64 else .Raw
-			if init_err = deflate.inflate_reader_init(&m.inflate, &m.ctx, format, expected, options, allocator); init_err != nil {
-				deflate.inflate_reader_destroy(&m.inflate)
+			format := deflate.Format.Raw64 if method == .Deflate64 else .Raw
+			if init_err = deflate.reader_init(&m.inflate, &m.ctx, format, expected, options, allocator); init_err != nil {
+				deflate.reader_destroy(&m.inflate)
 			}
 		case .BZip2:
 			m.mode = .BZip2
@@ -1022,7 +1022,7 @@ _member_destroy :: proc(m: ^Member) {
 	switch m.mode {
 	case .Store:
 	case .Inflate:
-		deflate.inflate_reader_destroy(&m.inflate)
+		deflate.reader_destroy(&m.inflate)
 		compress.destroy_context(&m.ctx)
 	case .BZip2:
 		bzip2.reader_destroy(&m.bzip2)
@@ -1070,7 +1070,7 @@ _member_read :: proc(m: ^Member, p: []u8) -> (n: int, err: Error) {
 		codec_err: compress.Error
 		#partial switch m.mode {
 		case .Inflate:
-			n, codec_err = deflate.inflate_reader_read(&m.inflate, p)
+			n, codec_err = deflate.reader_read(&m.inflate, p)
 		case .BZip2:
 			n, codec_err = bzip2.reader_read(&m.bzip2, p)
 		case .PPMd:

@@ -163,10 +163,49 @@ Implode_Tree :: struct {
 }
 
 @(private)
-refill_bits :: proc(z: ^compress.Context) -> (err: Error) #no_bounds_check {
+Output_Progress :: struct {
+	options:   compress.Options,
+	base:      i64,
+	pulled:    i64,
+	total_in:  i64,
+	total_out: i64,
+	interval:  int,
+	mark:      int,
+}
+
+@(private)
+check_options :: proc "contextless" (options: compress.Options) -> (err: Error) {
+	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
+		return General_Error.Incompatible_Options
+	}
+	return nil
+}
+
+@(private)
+progress_begin :: proc(p: ^Output_Progress, z: ^compress.Context, expected: int, options: compress.Options) {
+	p^ = {options = options, total_in = -1, total_out = i64(expected), mark = max(int)}
+	if options.progress == nil {
+		return
+	}
+	p.total_in = i64(compress.input_size(z))
+	p.interval = compress.progress_interval(options)
+	p.mark     = p.interval
+	p.base     = i64(len(z.window)) + i64(z.num_bits / 8)
+}
+
+@(private)
+progress_report :: proc(p: ^Output_Progress, z: ^compress.Context, written: int, bits: u64) -> (err: Error) {
+	p.mark = written + p.interval if p.interval < max(int) - written else max(int)
+	consumed := p.base + p.pulled - i64(len(z.window)) - i64(bits / 8)
+	return compress.report_progress(p.options, consumed, i64(written), p.total_in, p.total_out)
+}
+
+@(private)
+refill_bits :: proc(z: ^compress.Context, pulled: ^i64) -> (err: Error) #no_bounds_check {
 	for z.num_bits <= 56 {
 		if len(z.window) == 0 {
 			refill_err := compress.refill_window(z, 1)
+			pulled^ += i64(len(z.window))
 			if refill_err == .EOF {
 				return nil
 			}
@@ -182,9 +221,9 @@ refill_bits :: proc(z: ^compress.Context) -> (err: Error) #no_bounds_check {
 }
 
 @(private)
-read_bits :: #force_inline proc(z: ^compress.Context, count: uint) -> (value: int, available: bool, err: Error) #no_bounds_check {
+read_bits :: #force_inline proc(z: ^compress.Context, pulled: ^i64, count: uint) -> (value: int, available: bool, err: Error) #no_bounds_check {
 	if z.num_bits < u64(count) {
-		refill_bits(z) or_return
+		refill_bits(z, pulled) or_return
 		if z.num_bits < u64(count) {
 			return 0, false, nil
 		}
@@ -196,9 +235,9 @@ read_bits :: #force_inline proc(z: ^compress.Context, count: uint) -> (value: in
 }
 
 @(private)
-read_bits_required :: #force_inline proc(z: ^compress.Context, count: uint) -> (value: int, err: Error) {
+read_bits_required :: #force_inline proc(z: ^compress.Context, pulled: ^i64, count: uint) -> (value: int, err: Error) {
 	available: bool
-	value, available = read_bits(z, count) or_return
+	value, available = read_bits(z, pulled, count) or_return
 	if !available {
 		return 0, General_Error.Stream_Too_Short
 	}
@@ -206,7 +245,7 @@ read_bits_required :: #force_inline proc(z: ^compress.Context, count: uint) -> (
 }
 
 @(private)
-bits_refill :: #force_inline proc(z: ^compress.Context, b: ^Bits) -> (err: Error) #no_bounds_check {
+bits_refill :: #force_inline proc(z: ^compress.Context, pulled: ^i64, b: ^Bits) -> (err: Error) #no_bounds_check {
 	if len(z.window) >= 8 && b.count <= 56 {
 		bytes := (64 - b.count) >> 3
 		total := b.count + bytes << 3
@@ -221,16 +260,16 @@ bits_refill :: #force_inline proc(z: ^compress.Context, b: ^Bits) -> (err: Error
 	}
 	z.code_buffer = b.buffer
 	z.num_bits    = b.count
-	err = refill_bits(z)
+	err = refill_bits(z, pulled)
 	b.buffer = z.code_buffer
 	b.count  = z.num_bits
 	return
 }
 
 @(private)
-bits_read :: #force_inline proc(z: ^compress.Context, b: ^Bits, count: uint) -> (value: int, available: bool, err: Error) #no_bounds_check {
+bits_read :: #force_inline proc(z: ^compress.Context, pulled: ^i64, b: ^Bits, count: uint) -> (value: int, available: bool, err: Error) #no_bounds_check {
 	if b.count < u64(count) {
-		bits_refill(z, b) or_return
+		bits_refill(z, pulled, b) or_return
 		if b.count < u64(count) {
 			return 0, false, nil
 		}

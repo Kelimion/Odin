@@ -200,3 +200,20 @@ Block_Filter :: struct {
 	branch: filters.Branch_State,
 	delta:  filters.Delta_State,
 }
+
+@(private)
+Encode_Progress :: struct {
+	options:  compress.Options,
+	base_in:  i64,
+	base_out: i64,
+	total_in: i64,
+	mark:     i64,
+}
+
+@(private)
+_check_options :: proc "contextless" (options: compress.Options) -> (err: Error) {
+	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
+		return General_Error.Incompatible_Options
+	}
+	return nil
+}

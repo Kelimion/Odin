@@ -69,7 +69,7 @@ shrink_test_reference :: proc(t: ^testing.T) {
 			case 0:
 				err = pkzip_legacy.unshrink(&output, m.data, m.unpacked)
 			case 1:
-				err = pkzip_legacy.unshrink(&output, m.data, m.unpacked, m.unpacked)
+				err = pkzip_legacy.unshrink(&output, m.data, m.unpacked, {max_output_size = m.unpacked})
 			case 2:
 				r   := Trickle_Reader{data = m.data, chunk = 1}
 				ctx := compress.init_context(trickle_stream(&r), &output)
@@ -203,7 +203,7 @@ shrink_test_output_limit :: proc(t: ^testing.T) {
 	{
 		output: [dynamic]u8
 		defer delete(output)
-		limit_err := pkzip_legacy.unshrink(&output, data, len(full), len(full) - 1)
+		limit_err := pkzip_legacy.unshrink(&output, data, len(full), {max_output_size = len(full) - 1})
 		testing.expect_value(t, limit_err, compress.General_Error.Output_Too_Short)
 		testing.expect_value(t, cap(output), 0)
 	}

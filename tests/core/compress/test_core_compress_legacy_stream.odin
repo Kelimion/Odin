@@ -130,7 +130,7 @@ legacy_stream_test_memory :: proc(t: ^testing.T) {
 		size := legacy_test_bomb_size(method, 130_000)
 
 		want: [dynamic]u8
-		testing.expect_value(t, legacy_test_unpack(method, &want, data, size, compress.COMPRESS_OUTPUT_ALLOCATE_MAX), nil)
+		testing.expect_value(t, legacy_test_unpack(method, &want, data, size), nil)
 		want_crc := hash.crc32(want[:])
 		delete(want)
 

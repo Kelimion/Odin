@@ -1,9 +1,12 @@
 package test_core_compress
 
 import "base:runtime"
+import "core:bytes"
 import "core:compress"
 import "core:compress/xz"
+import "core:fmt"
 import "core:hash"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -189,15 +192,15 @@ test_xz_limits :: proc(t: ^testing.T) {
 	out: [dynamic]u8
 	defer delete(out)
 
-	testing.expect_value(t, xz.decompress(&out, data, {}, -1, 80_000), nil)
+	testing.expect_value(t, xz.decompress(&out, data, {}, -1, {max_output_size = 80_000}), nil)
 	testing.expect_value(t, len(out), 80_000)
-	testing.expect_value(t, xz.decompress(&out, data, {}, -1, 79_999), compress.Error(compress.General_Error.Output_Too_Short))
+	testing.expect_value(t, xz.decompress(&out, data, {}, -1, {max_output_size = 79_999}), compress.Error(compress.General_Error.Output_Too_Short))
 	testing.expect_value(t, xz.decompress(&out, data, {}, 80_001), compress.Error(compress.General_Error.Size_Mismatch))
 	testing.expect_value(t, xz.decompress(&out, data, {}, 79_999), compress.Error(compress.General_Error.Size_Mismatch))
 
 	threads, threads_err := os.read_entire_file(xz_asset("text.threads.xz"), context.allocator)
 	if testing.expect_value(t, threads_err, nil) {
-		testing.expect_value(t, xz.decompress(&out, threads, {}, -1, 40_000), compress.Error(compress.General_Error.Output_Too_Short))
+		testing.expect_value(t, xz.decompress(&out, threads, {}, -1, {max_output_size = 40_000}), compress.Error(compress.General_Error.Output_Too_Short))
 		delete(threads)
 	}
 
@@ -251,7 +254,7 @@ test_xz_validates_before_allocating :: proc(t: ^testing.T) {
 		}
 		defer delete(data)
 		out := make([dynamic]u8, runtime.nil_allocator())
-		err := xz.decompress(&out, data, {}, -1, compress.COMPRESS_OUTPUT_ALLOCATE_MAX, runtime.nil_allocator())
+		err := xz.decompress(&out, data, {}, -1, {}, runtime.nil_allocator())
 		_, allocation_failed := err.(runtime.Allocator_Error)
 		testing.expectf(t, err != nil && !allocation_failed, "%s: %v", name, err)
 	}
@@ -347,4 +350,185 @@ test_xz_concatenation :: proc(t: ^testing.T) {
 	defer delete(out)
 	testing.expect_value(t, xz.decompress(&out, many[:]), nil)
 	testing.expect_value(t, len(out), 1)
+}
+
+xz_test_encode :: proc(output: ^[dynamic]u8, input: []u8, xz_options: xz.Options, to_slice: bool, options: compress.Options, allocator := context.allocator) -> (err: xz.Error) {
+	if !to_slice {
+		return xz.compress(output, input, .Level_1, xz_options, options, allocator)
+	}
+	buffer := make([]u8, xz.compress_bound(len(input), .Level_1, xz_options = xz_options))
+	defer delete(buffer)
+	n: int
+	n, err = xz.compress(buffer, input, .Level_1, xz_options, options, allocator)
+	clear(output)
+	if err == nil {
+		append(output, ..buffer[:n])
+	}
+	return
+}
+
+@(test)
+test_xz_decode_options :: proc(t: ^testing.T) {
+	INTERVAL :: 10_000
+	g := Lz4_Test_Lcg{state = 0x787a4f50}
+	text := lz4_test_lcg_text(&g, 30 * INTERVAL)
+	defer delete(text)
+	packed: [dynamic]u8
+	defer delete(packed)
+	testing.expect_value(t, xz.compress(&packed, text, .Level_1, {block_size = 100_000}), nil)
+	log: Ppmd_Progress_Log
+	defer delete(log.calls)
+	first: [dynamic]compress.Progress
+	defer delete(first)
+
+	for kind in Stream_Kind {
+		for expected in ([]int{-1, len(text)}) {
+			input := packed[:]
+			output: [dynamic]u8
+			defer delete(output)
+			br: bytes.Reader
+			tr: Trickle_Reader
+			ctx := stream_test_context(kind, &input, &br, &tr, &output)
+			err := xz.decompress(&ctx, {}, expected, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+			compress.destroy_context(&ctx)
+			label := fmt.tprintf("xz progress %v, expected %v", kind, expected)
+			testing.expectf(t, err == nil && bytes.equal(output[:], text), "%v: %v", label, err)
+			testing.expectf(t, len(log.calls) == 30, "%v: %v calls", label, len(log.calls))
+			ppmd_progress_expect(t, label, log.calls[:], i64(len(packed)), i64(expected), i64(len(packed)), i64(len(text)))
+			for c, i in log.calls {
+				testing.expectf(t, c.bytes_out == i64(i + 1) * INTERVAL, "%v call %v: %v bytes out", label, i, c.bytes_out)
+			}
+			codec_progress_same(t, label, &first, log.calls[:])
+		}
+	}
+	free_all(context.temp_allocator)
+
+	{
+		output: [dynamic]u8
+		defer delete(output)
+		testing.expect_value(t, xz.decompress(&output, packed[:], {}, -1, ppmd_progress_options(&log)), nil)
+		testing.expectf(t, len(log.calls) == 0, "xz default interval: %v calls", len(log.calls))
+
+		log.cancel_at = 2
+		err := xz.decompress(&output, packed[:], {}, -1, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+		testing.expectf(t, err == compress.General_Error.Canceled && len(log.calls) == 2, "xz cancel: %v, %v calls", err, len(log.calls))
+		input := packed[:]
+		br: bytes.Reader
+		tr: Trickle_Reader
+		ctx := stream_test_context(.One_Byte_No_Seek, &input, &br, &tr, &output)
+		err = xz.decompress(&ctx, {}, -1, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+		compress.destroy_context(&ctx)
+		testing.expectf(t, err == compress.General_Error.Canceled && len(log.calls) == 2, "xz stream cancel: %v, %v calls", err, len(log.calls))
+		log.cancel_at = 0
+	}
+
+	need := lzma_test_probs_memory(.Lzma2)
+	for kind in Stream_Kind {
+		for expected in ([]int{-1, len(text)}) {
+			for limit in ([]int{len(text) - 1, len(text)}) {
+				input := packed[:]
+				output: [dynamic]u8
+				defer delete(output)
+				br: bytes.Reader
+				tr: Trickle_Reader
+				ctx := stream_test_context(kind, &input, &br, &tr, &output)
+				err := xz.decompress(&ctx, {}, expected, {max_output_size = limit})
+				compress.destroy_context(&ctx)
+				if limit < len(text) {
+					testing.expectf(t, err == compress.General_Error.Output_Too_Short && len(output) <= limit, "xz %v, expected %v, limit %v: %v, %v bytes", kind, expected, limit, err, len(output))
+				} else {
+					testing.expectf(t, err == nil && bytes.equal(output[:], text), "xz %v, expected %v, limit %v: %v", kind, expected, limit, err)
+				}
+			}
+		}
+
+		for bad in LZMA_TEST_BAD_OPTIONS {
+			input := packed[:]
+			output: [dynamic]u8
+			defer delete(output)
+			br: bytes.Reader
+			tr: Trickle_Reader
+			ctx := stream_test_context(kind, &input, &br, &tr, &output)
+			err := xz.decompress(&ctx, {}, -1, bad)
+			compress.destroy_context(&ctx)
+			testing.expectf(t, err == compress.General_Error.Incompatible_Options, "xz %v %v: %v", kind, bad, err)
+		}
+
+		buffered := 0 if kind == .Memory else len(packed)
+		for memory in ([]int{buffered + need - 1, buffered + need}) {
+			input := packed[:]
+			output: [dynamic]u8
+			defer delete(output)
+			br: bytes.Reader
+			tr: Trickle_Reader
+			ctx := stream_test_context(kind, &input, &br, &tr, &output)
+			err := xz.decompress(&ctx, {}, -1, {max_memory = memory})
+			compress.destroy_context(&ctx)
+			if memory < buffered + need {
+				testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded, "xz %v, memory %v: %v", kind, memory, err)
+			} else {
+				testing.expectf(t, err == nil && bytes.equal(output[:], text), "xz %v, memory %v: %v", kind, memory, err)
+			}
+		}
+	}
+}
+
+@(test)
+test_xz_encode_limits :: proc(t: ^testing.T) {
+	INTERVAL :: 100_000
+	g := Lz4_Test_Lcg{state = 0x787a4f51}
+	text := lz4_test_lcg_text(&g, 1 << 20)
+	defer delete(text)
+	log: Ppmd_Progress_Log
+	defer delete(log.calls)
+	first: [dynamic]compress.Progress
+	defer delete(first)
+
+	filtered := xz.Options{block_size = 300_000, filter_count = 1}
+	filtered.filters[0] = {id = .X86}
+	for xz_options in ([]xz.Options{{block_size = 300_000}, filtered}) {
+		want: [dynamic]u8
+		defer delete(want)
+		testing.expect_value(t, xz.compress(&want, text, .Level_1, xz_options), nil)
+
+		clear(&first)
+		for to_slice in ([]bool{false, true}) {
+			label := fmt.tprintf("xz encode, %v filters, slice %v", xz_options.filter_count, to_slice)
+			got: [dynamic]u8
+			defer delete(got)
+			err := xz_test_encode(&got, text, xz_options, to_slice, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+			testing.expectf(t, err == nil && bytes.equal(got[:], want[:]), "%v: %v", label, err)
+			testing.expectf(t, len(log.calls) >= 4, "%v: %v calls", label, len(log.calls))
+			ppmd_progress_expect(t, label, log.calls[:], i64(len(text)), -1, i64(len(text)), i64(len(want)))
+			codec_progress_expect_spacing(t, label, log.calls[:max(len(log.calls) - 1, 0)], INTERVAL, true)
+			codec_progress_expect_last(t, label, log.calls[:], i64(len(text)), i64(len(want)))
+			codec_progress_same(t, label, &first, log.calls[:])
+
+			log.cancel_at = 2
+			err = xz_test_encode(&got, text, xz_options, to_slice, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+			testing.expectf(t, err == compress.General_Error.Canceled && len(log.calls) == 2 && len(got) == 0, "%v cancel: %v, %v calls, %v bytes", label, err, len(log.calls), len(got))
+			log.cancel_at = 0
+
+			err = xz_test_encode(&got, text, xz_options, to_slice, {max_output_size = len(want) - 1})
+			testing.expectf(t, err == compress.General_Error.Output_Too_Short && len(got) == 0, "%v limit: %v, %v bytes", label, err, len(got))
+			err = xz_test_encode(&got, text, xz_options, to_slice, {max_output_size = len(want)})
+			testing.expectf(t, err == nil && bytes.equal(got[:], want[:]), "%v at the limit: %v", label, err)
+
+			for bad in LZMA_TEST_BAD_OPTIONS {
+				err = xz_test_encode(&got, text, xz_options, to_slice, bad)
+				testing.expectf(t, err == compress.General_Error.Incompatible_Options, "%v %v: %v", label, bad, err)
+			}
+
+			err = xz_test_encode(&got, text, xz_options, to_slice, {max_memory = 1})
+			testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded, "%v memory 1: %v", label, err)
+			if xz_options.filter_count > 0 {
+				track: mem.Tracking_Allocator
+				mem.tracking_allocator_init(&track, context.allocator)
+				defer mem.tracking_allocator_destroy(&track)
+				err = xz_test_encode(&got, text, xz_options, to_slice, {max_memory = xz_options.block_size - 1}, mem.tracking_allocator(&track))
+				testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded && track.total_memory_allocated == 0, "%v scratch memory: %v, %v allocated", label, err, track.total_memory_allocated)
+			}
+		}
+		free_all(context.temp_allocator)
+	}
 }

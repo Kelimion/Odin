@@ -203,7 +203,7 @@ test_xz_hostile :: proc(t: ^testing.T) {
 		defer delete(input)
 		limit := c.limit if c.limit > 0 else compress.COMPRESS_OUTPUT_ALLOCATE_MAX
 		out: [dynamic]u8
-		err := xz.decompress(&out, input[:], {}, -1, limit)
+		err := xz.decompress(&out, input[:], {}, -1, {max_output_size = limit})
 		testing.expectf(t, err == c.err, "%s: %v, want %v", c.label, err, c.err)
 		if c.err == nil && err == nil {
 			want := 0

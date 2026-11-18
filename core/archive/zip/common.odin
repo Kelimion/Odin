@@ -373,7 +373,7 @@ Member :: struct {
 	section:   Section,
 	input:     []u8,
 	ctx:       compress.Context,
-	inflate:   deflate.Inflate_Reader,
+	inflate:   deflate.Reader,
 	bzip2:     bzip2.Reader,
 	ppmd:      ppmd.Reader,
 	lzma:      lzma.Reader,
@@ -534,7 +534,7 @@ Source :: struct {
 Encoder :: struct {
 	method:  Method,
 	w:       io.Writer,
-	deflate: deflate.Deflate_Writer,
+	deflate: deflate.Writer,
 	bzip2:   bzip2.Writer,
 	lzma:    lzma.Writer,
 	ppmd:    ppmd.Writer,

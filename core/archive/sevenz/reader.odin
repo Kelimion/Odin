@@ -1642,7 +1642,7 @@ _decoder_destroy :: proc(d: ^Folder_Decoder) {
 			#partial switch node.kind {
 			case .LZMA, .LZMA2:        lzma.reader_destroy(&node.lzma)
 			case .PPMd:                ppmd.reader_destroy(&node.ppmd)
-			case .Deflate, .Deflate64: deflate.inflate_reader_destroy(&node.inflate)
+			case .Deflate, .Deflate64: deflate.reader_destroy(&node.inflate)
 			case .BZip2:               bzip2.reader_destroy(&node.bzip2)
 			}
 		}
@@ -1897,10 +1897,10 @@ _node_start :: proc(node: ^Node, properties: []u8) -> (err: Error) {
 		node.active = true
 		codec_err = ppmd.reader_init(&node.ppmd, &node.ctx, props, expected, options, d.allocator)
 	case .Deflate, .Deflate64:
-		format := deflate.Inflate_Format.Raw64 if node.kind == .Deflate64 else .Raw
+		format := deflate.Format.Raw64 if node.kind == .Deflate64 else .Raw
 		_node_context(node) or_return
 		node.active = true
-		codec_err = deflate.inflate_reader_init(&node.inflate, &node.ctx, format, expected, options, d.allocator)
+		codec_err = deflate.reader_init(&node.inflate, &node.ctx, format, expected, options, d.allocator)
 	case .BZip2:
 		_node_context(node) or_return
 		node.active = true
@@ -2006,7 +2006,7 @@ _node_read :: proc(node: ^Node, p: []u8) -> (n: int, err: Error) {
 	case .PPMd:
 		n, codec_err = ppmd.reader_read(&node.ppmd, buf)
 	case .Deflate, .Deflate64:
-		n, codec_err = deflate.inflate_reader_read(&node.inflate, buf)
+		n, codec_err = deflate.reader_read(&node.inflate, buf)
 	case .BZip2:
 		n, codec_err = bzip2.reader_read(&node.bzip2, buf)
 	case .Branch, .Delta, .Swap2, .Swap4:
@@ -2066,7 +2066,7 @@ _node_end :: proc(node: ^Node) -> (err: Error) {
 	case .PPMd:
 		n, end_err = ppmd.reader_read(&node.ppmd, probe[:])
 	case .Deflate, .Deflate64:
-		n, end_err = deflate.inflate_reader_read(&node.inflate, probe[:])
+		n, end_err = deflate.reader_read(&node.inflate, probe[:])
 	case .BZip2:
 		n, end_err = bzip2.reader_read(&node.bzip2, probe[:])
 	case .Branch, .Delta, .Swap2, .Swap4:

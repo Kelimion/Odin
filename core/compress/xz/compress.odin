@@ -1,5 +1,6 @@
 package compress_xz
 
+import "core:compress"
 import "core:compress/filters"
 import "core:compress/lzma"
 import "core:crypto/sha2"
@@ -14,11 +15,11 @@ level_options :: proc(level := Level.Default) -> (options: Options) {
 	return
 }
 
-compress_bound :: proc(length: int, level := Level.Default, options := Options{}) -> int {
+compress_bound :: proc(length: int, level := Level.Default, xz_options := Options{}) -> int {
 	if length < 0 {
 		return -1
 	}
-	opts, err := _resolve(level, options)
+	opts, err := _resolve(level, xz_options)
 	if err != nil {
 		return -1
 	}
@@ -42,25 +43,31 @@ compress_bound :: proc(length: int, level := Level.Default, options := Options{}
 	return blocks * per_block + overhead
 }
 
-compress_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Level.Default, options := Options{}, allocator := context.allocator) -> (err: Error) {
+compress_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Level.Default, xz_options := Options{}, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	if output == nil {
 		return General_Error.Incompatible_Options
 	}
 	context.allocator = allocator
-	opts := _resolve(level, options) or_return
+	_check_options(options) or_return
+	opts := _resolve(level, xz_options) or_return
 	clear(output)
-	s := Sink{dynamic_output = output}
-	if err = _encode(&s, input, opts); err != nil {
+	s := Sink{dynamic_output = output, limit = compress.output_limit(options)}
+	if err = _encode(&s, input, opts, options); err != nil {
 		clear(output)
 	}
 	return
 }
 
-compress_to_slice :: proc(output, input: []u8, level := Level.Default, options := Options{}, allocator := context.allocator) -> (written: int, err: Error) {
+compress_to_slice :: proc(output, input: []u8, level := Level.Default, xz_options := Options{}, options: compress.Options = {}, allocator := context.allocator) -> (written: int, err: Error) {
 	context.allocator = allocator
-	opts := _resolve(level, options) or_return
-	s := Sink{slice_output = output}
-	_encode(&s, input, opts) or_return
+	_check_options(options) or_return
+	opts := _resolve(level, xz_options) or_return
+	limited := output
+	if options.max_output_size > 0 && options.max_output_size < len(output) {
+		limited = output[:options.max_output_size]
+	}
+	s := Sink{slice_output = limited, limit = len(limited)}
+	_encode(&s, input, opts, options) or_return
 	return s.pos, nil
 }
 
@@ -72,6 +79,7 @@ Sink :: struct {
 	dynamic_output: ^[dynamic]u8,
 	slice_output:   []u8,
 	pos:            int,
+	limit:          int,
 }
 
 @(private)
@@ -84,10 +92,11 @@ _sink_bytes :: proc(s: ^Sink) -> []u8 {
 
 @(private)
 _sink_take :: proc(s: ^Sink, n: int) -> (region: []u8, err: Error) {
+	if n > s.limit - s.pos {
+		return nil, General_Error.Output_Too_Short
+	}
 	if s.dynamic_output != nil {
 		non_zero_resize(s.dynamic_output, s.pos + n) or_return
-	} else if n > len(s.slice_output) - s.pos {
-		return nil, General_Error.Output_Too_Short
 	}
 	region = _sink_bytes(s)[s.pos:][:n]
 	s.pos += n
@@ -144,11 +153,32 @@ _resolve :: proc(level: Level, options: Options) -> (opts: Options, err: Error) 
 }
 
 @(private)
-_encode :: proc(s: ^Sink, input: []u8, opts: Options) -> (err: Error) {
+_encode :: proc(s: ^Sink, input: []u8, opts: Options, options: compress.Options) -> (err: Error) {
 	opts := opts
 	check      := opts.check.? or_else .CRC64
 	check_size := CHECK_SIZES[u8(check)]
 	flags      := [2]u8{0, u8(check)}
+
+	block := len(input)
+	if opts.block_size > 0 && opts.block_size < len(input) {
+		block = opts.block_size
+	}
+	scratch_size := block if opts.filter_count > 0 && len(input) > 0 else 0
+	memory       := compress.memory_limit(options)
+	if scratch_size > memory {
+		return General_Error.Memory_Limit_Exceeded
+	}
+	p     := Encode_Progress{options = options, total_in = i64(len(input)), mark = max(i64)}
+	inner := compress.Options{max_memory = max(memory - scratch_size, 1)}
+	if s.dynamic_output != nil {
+		inner.max_output_size = s.limit
+	}
+	if options.progress != nil {
+		p.mark                  = i64(compress.progress_interval(options))
+		inner.progress          = _encode_progress
+		inner.progress_data     = &p
+		inner.progress_interval = options.progress_interval
+	}
 
 	header: [HEADER_SIZE]u8
 	copy(header[:], HEADER_MAGIC[:])
@@ -156,13 +186,9 @@ _encode :: proc(s: ^Sink, input: []u8, opts: Options) -> (err: Error) {
 	endian.unchecked_put_u32le(header[8:12], hash.crc32(flags[:]))
 	_sink_put(s, header[:]) or_return
 
-	block := len(input)
-	if opts.block_size > 0 && opts.block_size < len(input) {
-		block = opts.block_size
-	}
 	scratch: []u8
-	if opts.filter_count > 0 && len(input) > 0 {
-		scratch = make([]u8, block) or_return
+	if scratch_size > 0 {
+		scratch = make([]u8, scratch_size) or_return
 	}
 	defer delete(scratch)
 	records: [dynamic][2]u64
@@ -193,11 +219,14 @@ _encode :: proc(s: ^Sink, input: []u8, opts: Options) -> (err: Error) {
 		_sink_take(s, gap) or_return
 		props: lzma.Properties
 		packed: int
+		p.base_in = i64(offset)
 		if s.dynamic_output != nil {
-			props = lzma.compress_lzma2_append(s.dynamic_output, data, opts.lzma2) or_return
+			p.base_out = -i64(gap)
+			props = lzma.compress_lzma2_append(s.dynamic_output, data, opts.lzma2, inner) or_return
 			packed = len(s.dynamic_output) - s.pos
 		} else {
-			packed, props = lzma.compress_lzma2_to_slice(s.slice_output[s.pos:], data, opts.lzma2) or_return
+			p.base_out = i64(header_pos)
+			packed, props = lzma.compress_lzma2_to_slice(s.slice_output[s.pos:], data, opts.lzma2, inner) or_return
 		}
 
 		size := _block_header(block_header[:], opts, props, u64(packed), u64(len(plain)))
@@ -227,6 +256,9 @@ _encode :: proc(s: ^Sink, input: []u8, opts: Options) -> (err: Error) {
 			sha2.final(&ctx, region)
 		}
 		append(&records, [2]u64{u64(size + packed + check_size), u64(len(plain))}) or_return
+		if end := i64(offset + len(plain)); end < p.total_in && end >= p.mark {
+			_encode_report(&p, end, i64(s.pos)) or_return
+		}
 	}
 
 	index_start := s.pos
@@ -251,7 +283,25 @@ _encode :: proc(s: ^Sink, input: []u8, opts: Options) -> (err: Error) {
 	footer[8], footer[9] = flags[0], flags[1]
 	copy(footer[10:], FOOTER_MAGIC[:])
 	endian.unchecked_put_u32le(footer[0:4], hash.crc32(footer[4:10]))
-	return _sink_put(s, footer[:])
+	_sink_put(s, footer[:]) or_return
+	return compress.report_progress(options, i64(len(input)), i64(s.pos), i64(len(input)), -1)
+}
+
+@(private)
+_encode_progress :: proc(progress: compress.Progress, user_data: rawptr) -> (cancel: bool) {
+	p := (^Encode_Progress)(user_data)
+	bytes_in := p.base_in + progress.bytes_in
+	if bytes_in < p.mark || bytes_in >= p.total_in {
+		return false
+	}
+	return _encode_report(p, bytes_in, p.base_out + progress.bytes_out) != nil
+}
+
+@(private)
+_encode_report :: proc(p: ^Encode_Progress, bytes_in, bytes_out: i64) -> (err: Error) {
+	interval := i64(compress.progress_interval(p.options))
+	p.mark = bytes_in + interval if interval <= max(i64) - bytes_in else max(i64)
+	return compress.report_progress(p.options, bytes_in, bytes_out, p.total_in, -1)
 }
 
 @(private)

@@ -328,7 +328,7 @@ _start_decoder :: proc(r: ^Reader, method: archive.Method) -> (err: Error) {
 	decoder_err: compress.Error
 	#partial switch method {
 	case .Deflate:
-		decoder_err = deflate.inflate_reader_init(&r.inflate, &r.ctx, .Gzip, -1, r.options, r.allocator)
+		decoder_err = deflate.reader_init(&r.inflate, &r.ctx, .Gzip, -1, r.options, r.allocator)
 	case .BZip2:
 		decoder_err = bzip2.reader_init(&r.bzip2_reader, &r.ctx, -1, r.options, r.allocator)
 	case .LZ4:
@@ -354,7 +354,7 @@ _start_decoder :: proc(r: ^Reader, method: archive.Method) -> (err: Error) {
 _decoder_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: compress.Error) {
 	#partial switch r.compression {
 	case .Deflate:
-		return deflate.inflate_reader_read(&r.inflate, p)
+		return deflate.reader_read(&r.inflate, p)
 	case .BZip2:
 		return bzip2.reader_read(&r.bzip2_reader, p)
 	case .LZ4:
@@ -371,7 +371,7 @@ _decoder_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: compress.Error) {
 _destroy_decoder :: proc(r: ^Reader) {
 	#partial switch r.compression {
 	case .Deflate:
-		deflate.inflate_reader_destroy(&r.inflate)
+		deflate.reader_destroy(&r.inflate)
 	case .BZip2:
 		bzip2.reader_destroy(&r.bzip2_reader)
 	case .LZ4:

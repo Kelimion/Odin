@@ -193,9 +193,7 @@ stream_init :: proc(r: ^Reader, z: ^compress.Context, kind: Stream_Kind, props: 
 	r.options   = options
 	r.allocator = allocator
 	r.total_in  = -1
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
-		return General_Error.Incompatible_Options
-	}
+	check_options(options) or_return
 	if options.progress != nil {
 		r.total_in = i64(compress.input_size(z))
 	}
@@ -366,9 +364,7 @@ writer_create :: proc(lw: ^Writer, w: io.Writer, kind: Stream_Kind, lzma_options
 		writer_destroy(lw)
 	}
 
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
-		return {}, General_Error.Incompatible_Options
-	}
+	check_options(options) or_return
 	lzma2    := kind == .LZMA2
 	size     := -1
 	expected := UNKNOWN_SIZE
@@ -388,7 +384,7 @@ writer_create :: proc(lw: ^Writer, w: io.Writer, kind: Stream_Kind, lzma_options
 		keep_before = u64(encoder_history(opts.dict_size)) + NUM_OPTS + 1
 		need       := keep_before + threshold + BLOCK_MOVE_ALIGN
 		block_size  = min((need + (need >> (1 if need < 1 << 30 else 2)) + BLOCK_SIZE_ALIGN - 1) &~ u64(BLOCK_SIZE_ALIGN - 1), BLOCK_SIZE_MAX)
-		memory     := encoder_memory(opts, expected, lzma2) + u64(out_size)
+		memory     := u64(size_of(Writer_State)) + encoder_memory(opts, expected, lzma2) + u64(out_size)
 		short      := false
 		if options.buffer != nil {
 			short = u64(len(options.buffer)) < need

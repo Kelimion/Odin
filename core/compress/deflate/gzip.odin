@@ -4,14 +4,14 @@ import "core:compress"
 import "core:hash"
 import "core:io"
 
-inflate_gzip :: proc{inflate_gzip_from_context, inflate_gzip_from_bytes}
+decompress_gzip :: proc{decompress_gzip_from_context, decompress_gzip_from_bytes}
 
-inflate_gzip_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_gzip_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
 
 	expected := compress.declared_size(expected_output_size)
 	if expected > compress.output_limit(options) {
-		return General_Error.Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX
+		return General_Error.Output_Too_Short
 	}
 
 	isize := i64(-1)
@@ -55,13 +55,13 @@ inflate_gzip_from_context :: proc(z: ^compress.Context, expected_output_size := 
 	}
 }
 
-inflate_gzip_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_gzip_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return inflate_gzip_from_context(&ctx, expected_output_size, options, allocator)
+	return decompress_gzip_from_context(&ctx, expected_output_size, options, allocator)
 }
 
-inflate_gzip_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_gzip_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	return inflate_stream_to_writer(w, z, .Gzip, expected_output_size, options, allocator)
 }
 

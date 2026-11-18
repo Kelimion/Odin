@@ -422,7 +422,7 @@ compress_lz4_frame_errors :: proc(t: ^testing.T) {
 	sized[6] += 1
 	sized[14] = u8(xxhash.XXH32(sized[4:14]) >> 8)
 	clear(&output)
-	testing.expect_value(t, lz4.decompress_frame(&output, sized[:n]), compress.Error(lz4.LZ4_Error.Content_Size_Mismatch))
+	testing.expect_value(t, lz4.decompress_frame(&output, sized[:n]), compress.Error(compress.General_Error.Size_Mismatch))
 
 	oversized := []byte{0x04, 0x22, 0x4d, 0x18, 0x40, 0x40, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
 	oversized[6] = u8(xxhash.XXH32(oversized[4:6]) >> 8)

@@ -5,13 +5,20 @@ import "base:runtime"
 import "core:compress"
 
 @(private)
-output_limit :: proc(z: ^compress.Context, expected_output_size, max_output_size, expansion_max: int) -> (expected: int, err: Error) {
+output_limit :: proc(z: ^compress.Context, expected_output_size: int, options: compress.Options, expansion_max, memory: int) -> (expected: int, err: Error) {
+	check_options(options) or_return
 	expected = compress.declared_size(expected_output_size)
-	if expected < 0 || max_output_size < 0 {
+	if expected < 0 {
 		return expected, General_Error.Incompatible_Options
 	}
-	if expected > max_output_size {
+	if expected > compress.output_limit(options) {
 		return expected, General_Error.Output_Too_Short
+	}
+	if expected == 0 {
+		return
+	}
+	if memory > compress.memory_limit(options) {
+		return expected, General_Error.Memory_Limit_Exceeded
 	}
 
 	input_size := compress.input_size(z)
@@ -20,9 +27,7 @@ output_limit :: proc(z: ^compress.Context, expected_output_size, max_output_size
 	if input_size >= 0 && input_size < max(int) / expansion_max {
 		bound = input_size * expansion_max
 	}
-	if expected > 0 {
-		non_zero_reserve(z.output, len(z.output) + compress.output_reservation(expected, bound, input_size)) or_return
-	}
+	non_zero_reserve(z.output, len(z.output) + compress.output_reservation(expected, bound, input_size)) or_return
 	return
 }
 

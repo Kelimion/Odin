@@ -28,10 +28,10 @@ zip_deflate_test_reference :: proc(t: ^testing.T) {
 		switch u16(m.method) {
 		case 8:
 			found[0] += 1
-			err = deflate.inflate_raw(&output, m.data, m.unpacked)
+			err = deflate.decompress_raw(&output, m.data, m.unpacked)
 		case 9:
 			found[1] += 1
-			err = deflate.inflate64_raw(&output, m.data, m.unpacked)
+			err = deflate.decompress_raw64(&output, m.data, m.unpacked)
 		case:
 			continue
 		}

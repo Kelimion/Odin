@@ -228,7 +228,7 @@ implode_test_output_limit :: proc(t: ^testing.T) {
 	{
 		output: [dynamic]u8
 		defer delete(output)
-		limit_err := pkzip_legacy.explode(&output, data, {}, len(full), len(full) - 1)
+		limit_err := pkzip_legacy.explode(&output, data, {}, len(full), {max_output_size = len(full) - 1})
 		testing.expect_value(t, limit_err, compress.General_Error.Output_Too_Short)
 		testing.expect_value(t, cap(output), 0)
 	}

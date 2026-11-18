@@ -10,31 +10,30 @@ decompress_frame :: proc{decompress_frame_from_bytes, decompress_frame_from_cont
 
 decompress_block_to_slice :: proc(output, input: []u8, options: compress.Options = {}, dictionary: []u8 = nil) -> (written: int, err: Error) {
 	lz4_check_options(options) or_return
-	return lz4_decode_block(output[:lz4_output_size(len(output), options)], input, options, dictionary)
+	return lz4_decode_block(output[:lz4_output_size(len(output), options)], input, options, dictionary, -1)
 }
 
-decompress_block_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, max_output_size: int, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
+decompress_block_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if output == nil || max_output_size < 0 {
-		return General_Error.Incompatible_Options
+	expected := lz4_block_check(output, expected_output_size, options) or_return
+
+	size := min(compress.output_limit(options), lz4_decompress_bound(len(input)))
+	if expected >= 0 {
+		size = min(expected, lz4_decompress_bound(len(input)))
 	}
-	lz4_check_options(options) or_return
-	limit := lz4_output_size(max_output_size, options)
-	if limit > compress.COMPRESS_OUTPUT_ALLOCATE_MAX {
-		return General_Error.Output_Too_Short
-	}
-	non_zero_resize(output, min(limit, lz4_decompress_bound(len(input)))) or_return
+	non_zero_resize(output, size) or_return
 	written: int
-	written, err = lz4_decode_block(output[:], input, options, dictionary)
+	written, err = lz4_decode_block(output[:], input, options, dictionary, i64(expected))
 	non_zero_resize(output, written)
+	if expected >= 0 && (err == General_Error.Output_Too_Short || (err == nil && written != expected)) {
+		return General_Error.Size_Mismatch
+	}
 	return
 }
 
-decompress_block_from_context :: proc(z: ^compress.Context, max_output_size: int, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
+decompress_block_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	if z.output == nil {
-		return General_Error.Incompatible_Options
-	}
+	lz4_block_check(z.output, expected_output_size, options) or_return
 
 	input: []u8
 	remaining: [dynamic]u8
@@ -47,7 +46,7 @@ decompress_block_from_context :: proc(z: ^compress.Context, max_output_size: int
 		input     = remaining[:]
 	}
 
-	err = decompress_block_from_bytes(z.output, input, max_output_size, options, dictionary, allocator)
+	err = decompress_block_from_bytes(z.output, input, expected_output_size, options, dictionary, allocator)
 	z.bytes_written = i64(len(z.output))
 	return
 }
@@ -212,11 +211,24 @@ frame_reader_destroy :: proc(r: ^Frame_Reader) {
 }
 
 @(private)
-lz4_decode_block :: proc(output, input: []u8, options: compress.Options, dictionary: []u8) -> (written: int, err: Error) {
+lz4_block_check :: proc "contextless" (output: ^[dynamic]u8, expected_output_size: int, options: compress.Options) -> (expected: int, err: Error) {
+	if output == nil {
+		return -1, General_Error.Incompatible_Options
+	}
+	lz4_check_options(options) or_return
+	expected = compress.declared_size(expected_output_size)
+	if expected > compress.output_limit(options) {
+		return expected, General_Error.Output_Too_Short
+	}
+	return
+}
+
+@(private)
+lz4_decode_block :: proc(output, input: []u8, options: compress.Options, dictionary: []u8, total_out: i64) -> (written: int, err: Error) {
 	if options.progress == nil {
 		return lz4_decode(output, 0, 0, input, dictionary, false, nil)
 	}
-	progress := lz4_progress_init(options, 0, i64(len(input)), -1)
+	progress := lz4_progress_init(options, 0, i64(len(input)), total_out)
 	return lz4_decode(output, 0, 0, input, dictionary, true, &progress)
 }
 
@@ -363,7 +375,7 @@ lz4_decode_frame :: proc(z: ^compress.Context, start, limit, input_size: int, di
 			return start, General_Error.Output_Too_Short
 		}
 		frame_limit = start + int(content_size)
-		overflow    = LZ4_Error.Content_Size_Mismatch
+		overflow    = General_Error.Size_Mismatch
 		if start + lz4_initial_size(int(content_size), input_size) > cap(z.output) {
 			non_zero_reserve(z.output, start + lz4_initial_size(int(content_size), input_size)) or_return
 		}
@@ -437,7 +449,7 @@ lz4_decode_frame :: proc(z: ^compress.Context, start, limit, input_size: int, di
 		}
 	}
 	if has_content_size && u64(written - start) != content_size {
-		return written, LZ4_Error.Content_Size_Mismatch
+		return written, General_Error.Size_Mismatch
 	}
 	return written, nil
 }
@@ -873,7 +885,7 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 					}
 				}
 				if r.content_size >= 0 && r.total - r.frame_start != r.content_size {
-					return LZ4_Error.Content_Size_Mismatch
+					return General_Error.Size_Mismatch
 				}
 				r.frames += 1
 				r.state   = .Magic
@@ -897,9 +909,7 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 				}
 			}
 			overflow := Error(General_Error.Output_Too_Short)
-			if r.content_size >= 0 {
-				overflow = LZ4_Error.Content_Size_Mismatch
-			} else if r.total_out >= 0 {
+			if r.content_size >= 0 || r.total_out >= 0 {
 				overflow = General_Error.Size_Mismatch
 			}
 			start := r.written

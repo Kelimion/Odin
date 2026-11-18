@@ -5,6 +5,7 @@ import "core:bytes"
 import "core:compress"
 import "core:compress/xz"
 import "core:encoding/endian"
+import "core:fmt"
 import "core:hash"
 import "core:io"
 import "core:math/rand"
@@ -407,6 +408,85 @@ test_xz_find_block :: proc(t: ^testing.T) {
 		xz.index_destroy(&empty_index)
 		delete(data)
 	}
+}
+
+@(test)
+test_xz_decompress_block_options :: proc(t: ^testing.T) {
+	INTERVAL :: 10_000
+	g := Lz4_Test_Lcg{state = 0x787a4f52}
+	text := lz4_test_lcg_text(&g, 120_000)
+	defer delete(text)
+	packed: [dynamic]u8
+	defer delete(packed)
+	testing.expect_value(t, xz.compress(&packed, text, .Level_1, {block_size = 50_000}), nil)
+	index, index_err := xz.read_index(packed[:])
+	defer xz.index_destroy(&index)
+	if !testing.expect_value(t, index_err, nil) || !testing.expect_value(t, len(index.blocks), 3) {
+		return
+	}
+	log: Ppmd_Progress_Log
+	defer delete(log.calls)
+	first: [dynamic]compress.Progress
+	defer delete(first)
+	need := lzma_test_probs_memory(.Lzma2)
+
+	for b in 0..<len(index.blocks) {
+		info   := index.blocks[b]
+		size   := int(info.uncompressed_size)
+		padded := int((info.unpadded_size + 3) &~ 3)
+		want   := text[info.uncompressed_offset:][:size]
+		clear(&first)
+		for use_stream in ([]bool{false, true}) {
+			label := fmt.tprintf("block %v, stream %v", b, use_stream)
+			br: bytes.Reader
+			stream := bytes.reader_init(&br, packed[:])
+
+			{
+				out: [dynamic]u8
+				defer delete(out)
+				err := xz_index_block(&out, packed[:], stream, use_stream, &index, b, {max_output_size = size - 1})
+				testing.expectf(t, err == compress.General_Error.Output_Too_Short && cap(out) == 0, "%v, limit %v: %v, capacity %v", label, size - 1, err, cap(out))
+			}
+
+			out: [dynamic]u8
+			defer delete(out)
+			err := xz_index_block(&out, packed[:], stream, use_stream, &index, b, {max_output_size = size})
+			testing.expectf(t, err == nil && bytes.equal(out[:], want), "%v, limit %v: %v", label, size, err)
+
+			err = xz_index_block(&out, packed[:], stream, use_stream, &index, b, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+			testing.expectf(t, err == nil && bytes.equal(out[:], want), "%v progress: %v", label, err)
+			testing.expectf(t, len(log.calls) == size / INTERVAL, "%v progress: %v calls", label, len(log.calls))
+			ppmd_progress_expect(t, label, log.calls[:], i64(padded), i64(size), i64(padded), i64(size))
+			for c, i in log.calls {
+				testing.expectf(t, c.bytes_out == i64(i + 1) * INTERVAL, "%v call %v: %v bytes out", label, i, c.bytes_out)
+			}
+			codec_progress_same(t, label, &first, log.calls[:])
+
+			log.cancel_at = 2
+			err = xz_index_block(&out, packed[:], stream, use_stream, &index, b, ppmd_progress_options(&log, {progress_interval = INTERVAL}))
+			testing.expectf(t, err == compress.General_Error.Canceled && len(log.calls) == 2, "%v cancel: %v, %v calls", label, err, len(log.calls))
+			log.cancel_at = 0
+
+			for bad in LZMA_TEST_BAD_OPTIONS {
+				err = xz_index_block(&out, packed[:], stream, use_stream, &index, b, bad)
+				testing.expectf(t, err == compress.General_Error.Incompatible_Options, "%v %v: %v", label, bad, err)
+			}
+
+			memory := need + (padded if use_stream else 0)
+			err = xz_index_block(&out, packed[:], stream, use_stream, &index, b, {max_memory = memory - 1})
+			testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded, "%v, memory %v: %v", label, memory - 1, err)
+			err = xz_index_block(&out, packed[:], stream, use_stream, &index, b, {max_memory = memory})
+			testing.expectf(t, err == nil && bytes.equal(out[:], want), "%v, memory %v: %v", label, memory, err)
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+xz_index_block :: proc(output: ^[dynamic]u8, input: []u8, stream: io.Stream, use_stream: bool, index: ^xz.Index, block: int, options: compress.Options) -> (err: compress.Error) {
+	if use_stream {
+		return xz.decompress_block(output, stream, index, block, {}, options)
+	}
+	return xz.decompress_block(output, input, index, block, {}, options)
 }
 
 @(test)

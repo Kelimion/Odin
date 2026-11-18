@@ -118,7 +118,7 @@ Frame_Writer :: struct {
 	block_max:     int,
 	total:         i64,
 	flushed:       i64,
-	content_size:  i64,
+	input_size:    i64,
 	digest:        xxhash.XXH32_state,
 	err:           Error,
 	allocator:     runtime.Allocator,

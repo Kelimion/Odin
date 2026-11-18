@@ -84,7 +84,7 @@ lz4_content_size_is_a_limit :: proc(t: ^testing.T) {
 	{
 		output: [dynamic]byte
 		defer delete(output)
-		testing.expect_value(t, lz4.decompress_frame(&output, header[:]), compress.Error(compress.LZ4_Error.Content_Size_Mismatch))
+		testing.expect_value(t, lz4.decompress_frame(&output, header[:]), compress.Error(compress.General_Error.Size_Mismatch))
 		testing.expectf(t, cap(output) <= 255 * len(header), "capacity %v for a %v byte frame", cap(output), len(header))
 	}
 
@@ -101,7 +101,7 @@ lz4_content_size_is_a_limit :: proc(t: ^testing.T) {
 	{
 		output: [dynamic]byte
 		defer delete(output)
-		testing.expect_value(t, lz4.decompress_frame(&output, packed[:]), compress.Error(compress.LZ4_Error.Content_Size_Mismatch))
+		testing.expect_value(t, lz4.decompress_frame(&output, packed[:]), compress.Error(compress.General_Error.Size_Mismatch))
 		testing.expectf(t, cap(output) <= 100, "capacity %v for a content size of 100", cap(output))
 	}
 }
@@ -110,9 +110,40 @@ lz4_content_size_is_a_limit :: proc(t: ^testing.T) {
 lz4_block_allocation_bound :: proc(t: ^testing.T) {
 	output: [dynamic]byte
 	defer delete(output)
-	testing.expect_value(t, lz4.decompress_block(&output, []byte{0x10, 'x'}, compress.COMPRESS_OUTPUT_ALLOCATE_MAX), nil)
+	testing.expect_value(t, lz4.decompress_block(&output, []byte{0x10, 'x'}, -1, {max_output_size = compress.COMPRESS_OUTPUT_ALLOCATE_MAX}), nil)
 	testing.expect_value(t, len(output), 1)
 	testing.expectf(t, cap(output) <= 255 * 2, "capacity %v for a 2 byte block", cap(output))
+
+	declared: [dynamic]byte
+	defer delete(declared)
+	testing.expect_value(t, lz4.decompress_block(&declared, []byte{0x10, 'x'}, compress.COMPRESS_OUTPUT_ALLOCATE_MAX), compress.Error(compress.General_Error.Size_Mismatch))
+	testing.expectf(t, cap(declared) <= 255 * 2, "capacity %v for a 2 byte block declared at %v bytes", cap(declared), compress.COMPRESS_OUTPUT_ALLOCATE_MAX)
+}
+
+@(test)
+lz4_block_declared_over_limit :: proc(t: ^testing.T) {
+	block := []byte{0x50, 'h', 'e', 'l', 'l', 'o'}
+	{
+		output: [dynamic]byte
+		defer delete(output)
+		testing.expect_value(t, lz4.decompress_block(&output, block, 5, {max_output_size = 4}), compress.Error(compress.General_Error.Output_Too_Short))
+		testing.expect_value(t, cap(output), 0)
+		testing.expect_value(t, lz4.decompress_block(&output, block, -1, {max_output_size = 4}), compress.Error(compress.General_Error.Output_Too_Short))
+		testing.expect_value(t, lz4.decompress_block(&output, block, 5, {max_output_size = 5}), nil)
+		testing.expect_value(t, string(output[:]), "hello")
+	}
+	for kind in Stream_Kind {
+		input := block
+		output: [dynamic]byte
+		defer delete(output)
+		br: bytes.Reader
+		tr: Trickle_Reader
+		ctx := stream_test_context(kind, &input, &br, &tr, &output)
+		err := lz4.decompress_block(&ctx, 5, {max_output_size = 4})
+		compress.destroy_context(&ctx)
+		testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v: %v", kind, err)
+		testing.expectf(t, cap(output) == 0, "%v: capacity %v", kind, cap(output))
+	}
 }
 
 @(test)

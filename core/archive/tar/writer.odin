@@ -155,7 +155,7 @@ commit :: proc(tw: ^Writer) -> (err: Error) {
 	}
 	#partial switch tw.options.compression {
 	case .Deflate:
-		deflate.deflate_writer_finish(&tw.deflate) or_return
+		deflate.writer_finish(&tw.deflate) or_return
 	case .BZip2:
 		bzip2.writer_finish(&tw.bzip2) or_return
 	case .LZ4:
@@ -173,7 +173,7 @@ close_writer :: proc(tw: ^Writer) {
 	if tw.active {
 		#partial switch tw.options.compression {
 		case .Deflate:
-			deflate.deflate_writer_destroy(&tw.deflate)
+			deflate.writer_destroy(&tw.deflate)
 		case .BZip2:
 			bzip2.writer_destroy(&tw.bzip2)
 		case .LZ4:
@@ -255,8 +255,8 @@ _writer_init :: proc(tw: ^Writer, s: io.Stream, options: Writer_Options) -> (err
 	#partial switch options.compression {
 	case .Deflate:
 		deflate_level := deflate.Deflate_Level(level) if has_level else .Default
-		deflate.deflate_writer_init(&tw.deflate, s, .Gzip, deflate_level, codec, tw.allocator) or_return
-		tw.out = deflate.deflate_writer_to_stream(&tw.deflate)
+		deflate.writer_init(&tw.deflate, s, .Gzip, deflate_level, codec, tw.allocator) or_return
+		tw.out = deflate.writer_to_stream(&tw.deflate)
 	case .BZip2:
 		bzip2_level := bzip2.Level(level) if has_level else .Default
 		bzip2.writer_init(&tw.bzip2, s, bzip2_level, codec, tw.allocator) or_return

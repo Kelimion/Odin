@@ -5,11 +5,11 @@ import "core:compress"
 import "core:hash"
 import "core:io"
 
-deflate_raw  :: proc{deflate_raw_to_slice,  deflate_raw_to_dynamic}
-deflate_zlib :: proc{deflate_zlib_to_slice, deflate_zlib_to_dynamic}
-deflate_gzip :: proc{deflate_gzip_to_slice, deflate_gzip_to_dynamic}
+compress_raw  :: proc{compress_raw_to_slice,  compress_raw_to_dynamic}
+compress_zlib :: proc{compress_zlib_to_slice, compress_zlib_to_dynamic}
+compress_gzip :: proc{compress_gzip_to_slice, compress_gzip_to_dynamic}
 
-deflate_bound :: proc(len: int) -> int {
+compress_raw_bound :: proc(len: int) -> int {
 	if len < 0 || len > DEFLATE_INPUT_MAX {
 		return -1
 	}
@@ -18,32 +18,36 @@ deflate_bound :: proc(len: int) -> int {
 	return len + blocks * (5 * raw_per_block + 8) + 2 + 4 + 16
 }
 
-deflate_gzip_bound :: proc(len: int) -> int {
-	bound := deflate_bound(len)
+compress_zlib_bound :: proc(len: int) -> int {
+	return compress_raw_bound(len)
+}
+
+compress_gzip_bound :: proc(len: int) -> int {
+	bound := compress_raw_bound(len)
 	if bound < 0 {
 		return -1
 	}
 	return bound + size_of(Gzip_Header) + size_of(Gzip_Trailer)
 }
 
-deflate_raw_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+compress_raw_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	return deflate_to_dynamic(output, input, level, options, deflate_bound(len(input)), deflate_raw_to_slice)
+	return deflate_to_dynamic(output, input, level, options, compress_raw_bound(len(input)), compress_raw_to_slice)
 }
 
-deflate_zlib_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+compress_zlib_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	return deflate_to_dynamic(output, input, level, options, deflate_bound(len(input)), deflate_zlib_to_slice)
+	return deflate_to_dynamic(output, input, level, options, compress_zlib_bound(len(input)), compress_zlib_to_slice)
 }
 
-deflate_gzip_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+compress_gzip_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	return deflate_to_dynamic(output, input, level, options, deflate_gzip_bound(len(input)), deflate_gzip_to_slice)
+	return deflate_to_dynamic(output, input, level, options, compress_gzip_bound(len(input)), compress_gzip_to_slice)
 }
 
-deflate_raw_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
+compress_raw_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
 	output := output
-	output  = deflate_check_arguments(s, output, deflate_bound(len(input)), options) or_return
+	output  = deflate_check_arguments(s, output, compress_raw_bound(len(input)), options) or_return
 	q := output
 
 	s.bit_buffer = 0
@@ -52,9 +56,9 @@ deflate_raw_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_
 	return deflate_finish_slice(output, q, input, options)
 }
 
-deflate_zlib_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
+compress_zlib_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
 	output := output
-	output  = deflate_check_arguments(s, output, deflate_bound(len(input)), options) or_return
+	output  = deflate_check_arguments(s, output, compress_zlib_bound(len(input)), options) or_return
 	if len(output) < ZLIB_HEADER_SIZE {
 		return 0, General_Error.Output_Too_Short
 	}
@@ -80,9 +84,9 @@ deflate_zlib_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate
 	return deflate_finish_slice(output, q, input, options)
 }
 
-deflate_gzip_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
+compress_gzip_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate_Level.Default, options: compress.Options = {}) -> (written: int, err: Error) {
 	output := output
-	output  = deflate_check_arguments(s, output, deflate_gzip_bound(len(input)), options) or_return
+	output  = deflate_check_arguments(s, output, compress_gzip_bound(len(input)), options) or_return
 	if len(output) < size_of(Gzip_Header) {
 		return 0, General_Error.Output_Too_Short
 	}
@@ -106,7 +110,7 @@ deflate_gzip_to_slice :: proc(s: ^Deflate, output, input: []u8, level := Deflate
 	return deflate_finish_slice(output, q, input, options)
 }
 
-deflate_writer_init :: proc(dw: ^Deflate_Writer, w: io.Writer, format: Deflate_Format, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+writer_init :: proc(dw: ^Writer, w: io.Writer, format: Format, level := Deflate_Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	dw^ = {}
 	dw.format    = format
 	dw.level     = clamp(level, Deflate_Level.Stored, Deflate_Level.Best)
@@ -120,7 +124,7 @@ deflate_writer_init :: proc(dw: ^Deflate_Writer, w: io.Writer, format: Deflate_F
 	history   := DEFLATE64_WINDOW_SIZE if format == .Raw64 else DEFLATE_WINDOW_SIZE
 	state     := size_of(Deflate64) if format == .Raw64 else size_of(Deflate)
 	minimum   := 2 * history + DEFLATE_BLOCK_MAX + DEFLATE_LOOKAHEAD
-	out_size  := deflate_gzip_bound(DEFLATE_BLOCK_MAX)
+	out_size  := compress_gzip_bound(DEFLATE_BLOCK_MAX)
 	available := compress.memory_limit(options) - state - out_size
 	if options.buffer != nil {
 		if len(options.buffer) < minimum {
@@ -146,7 +150,7 @@ deflate_writer_init :: proc(dw: ^Deflate_Writer, w: io.Writer, format: Deflate_F
 	return nil
 }
 
-deflate_writer_write :: proc(dw: ^Deflate_Writer, data: []u8) -> (n: int, err: Error) {
+writer_write :: proc(dw: ^Writer, data: []u8) -> (n: int, err: Error) {
 	if dw.err != nil {
 		return 0, dw.err
 	}
@@ -176,7 +180,7 @@ deflate_writer_write :: proc(dw: ^Deflate_Writer, data: []u8) -> (n: int, err: E
 	return
 }
 
-deflate_writer_flush :: proc(dw: ^Deflate_Writer) -> (err: Error) {
+writer_flush :: proc(dw: ^Writer) -> (err: Error) {
 	if dw.err != nil {
 		return dw.err
 	}
@@ -190,7 +194,7 @@ deflate_writer_flush :: proc(dw: ^Deflate_Writer) -> (err: Error) {
 	return deflate_writer_sync(dw, dw.state)
 }
 
-deflate_writer_finish :: proc(dw: ^Deflate_Writer) -> (err: Error) {
+writer_finish :: proc(dw: ^Writer) -> (err: Error) {
 	if dw.err != nil {
 		return dw.err
 	}
@@ -207,13 +211,13 @@ deflate_writer_finish :: proc(dw: ^Deflate_Writer) -> (err: Error) {
 	return nil
 }
 
-deflate_writer_to_stream :: proc(dw: ^Deflate_Writer) -> (s: io.Stream) {
+writer_to_stream :: proc(dw: ^Writer) -> (s: io.Stream) {
 	s.data      = dw
 	s.procedure = deflate_writer_stream_proc
 	return
 }
 
-deflate_writer_destroy :: proc(dw: ^Deflate_Writer) {
+writer_destroy :: proc(dw: ^Writer) {
 	if dw.owns_window {
 		delete(dw.window, dw.allocator)
 	}
@@ -1037,7 +1041,7 @@ deflate_compress :: proc(s: ^$S, output: []u8, q: ^[]u8, input: []u8, requested_
 	level    := clamp(requested_level, Deflate_Level.Stored, Deflate_Level.Best)
 	total    := len(input)
 	base     := 0
-	bound    := deflate_bound(DEFLATE_BLOCK_MAX)
+	bound    := compress_raw_bound(DEFLATE_BLOCK_MAX)
 	interval := compress.progress_interval(options)
 	mark     := max(int)
 	if options.progress != nil {
@@ -1388,7 +1392,7 @@ deflate_check_arguments :: proc(s: ^$S, output: []u8, bound: int, options: compr
 	if options.max_output_size > 0 && options.max_output_size < len(output) {
 		limited = output[:options.max_output_size]
 	}
-	if len(limited) < bound && deflate_bound(DEFLATE_BLOCK_MAX) > compress.memory_limit(options) {
+	if len(limited) < bound && compress_raw_bound(DEFLATE_BLOCK_MAX) > compress.memory_limit(options) {
 		return nil, General_Error.Memory_Limit_Exceeded
 	}
 	return limited, nil
@@ -1406,7 +1410,7 @@ deflate_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level: Deflate_Lev
 		return General_Error.Incompatible_Options
 	}
 	size   := min(bound, compress.output_limit(options))
-	memory := size_of(S) + (deflate_bound(DEFLATE_BLOCK_MAX) if size < bound else 0)
+	memory := size_of(S) + (compress_raw_bound(DEFLATE_BLOCK_MAX) if size < bound else 0)
 	if memory > compress.memory_limit(options) {
 		return General_Error.Memory_Limit_Exceeded
 	}
@@ -1436,7 +1440,7 @@ deflate_gzip_header :: proc(level: Deflate_Level) -> (header: Gzip_Header) {
 }
 
 @(private)
-deflate_writer_start :: proc(dw: ^Deflate_Writer, w: io.Writer) {
+deflate_writer_start :: proc(dw: ^Writer, w: io.Writer) {
 	dw.w        = w
 	dw.filled   = 0
 	dw.out_len  = 0
@@ -1471,7 +1475,7 @@ deflate_writer_reset_state :: proc(s: ^$S, level: Deflate_Level) {
 }
 
 @(private)
-deflate_writer_digest :: proc(dw: ^Deflate_Writer, data: []u8) {
+deflate_writer_digest :: proc(dw: ^Writer, data: []u8) {
 	#partial switch dw.format {
 	case .Zlib: dw.digest = hash.adler32(data, dw.digest)
 	case .Gzip: dw.digest = hash.crc32(data, dw.digest)
@@ -1479,7 +1483,7 @@ deflate_writer_digest :: proc(dw: ^Deflate_Writer, data: []u8) {
 }
 
 @(private)
-deflate_writer_slide :: proc(dw: ^Deflate_Writer, s: ^$S) {
+deflate_writer_slide :: proc(dw: ^Writer, s: ^$S) {
 	WINDOW_SIZE :: DEFLATE64_WINDOW_SIZE when S == Deflate64 else DEFLATE_WINDOW_SIZE
 	WINDOW_MASK :: DEFLATE64_WINDOW_MASK when S == Deflate64 else DEFLATE_WINDOW_MASK
 	delta := (s.position - WINDOW_SIZE) &~ WINDOW_MASK
@@ -1490,7 +1494,7 @@ deflate_writer_slide :: proc(dw: ^Deflate_Writer, s: ^$S) {
 }
 
 @(private)
-deflate_writer_blocks :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
+deflate_writer_blocks :: proc(dw: ^Writer, s: ^$S) -> (err: Error) {
 	for dw.filled - int(s.position) >= DEFLATE_BLOCK_MAX + DEFLATE_LOOKAHEAD {
 		q := dw.out[dw.out_len:]
 		deflate_block(s, &q, dw.window[:dw.filled], false, dw.level)
@@ -1502,7 +1506,7 @@ deflate_writer_blocks :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
 }
 
 @(private)
-deflate_writer_sync :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
+deflate_writer_sync :: proc(dw: ^Writer, s: ^$S) -> (err: Error) {
 	for int(s.position) < dw.filled {
 		q := dw.out[dw.out_len:]
 		deflate_block(s, &q, dw.window[:dw.filled], false, dw.level)
@@ -1518,7 +1522,7 @@ deflate_writer_sync :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
 }
 
 @(private)
-deflate_writer_end :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
+deflate_writer_end :: proc(dw: ^Writer, s: ^$S) -> (err: Error) {
 	for {
 		q := dw.out[dw.out_len:]
 		is_last := deflate_block(s, &q, dw.window[:dw.filled], true, dw.level)
@@ -1549,7 +1553,7 @@ deflate_writer_end :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
 }
 
 @(private)
-deflate_writer_output :: proc(dw: ^Deflate_Writer) -> (err: Error) {
+deflate_writer_output :: proc(dw: ^Writer) -> (err: Error) {
 	if dw.out_len > 0 {
 		_, write_err := io.write_full(dw.w, dw.out[:dw.out_len])
 		if write_err != nil {
@@ -1562,16 +1566,16 @@ deflate_writer_output :: proc(dw: ^Deflate_Writer) -> (err: Error) {
 }
 
 @(private)
-deflate_writer_progress :: proc(dw: ^Deflate_Writer, s: ^$S) -> (err: Error) {
+deflate_writer_progress :: proc(dw: ^Writer, s: ^$S) -> (err: Error) {
 	return compress.report_progress(dw.options, dw.total - i64(dw.filled - int(s.position)), dw.flushed, -1, -1)
 }
 
 @(private)
 deflate_writer_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
-	dw := (^Deflate_Writer)(stream_data)
+	dw := (^Writer)(stream_data)
 	#partial switch mode {
 	case .Write:
-		written, write_err := deflate_writer_write(dw, p)
+		written, write_err := writer_write(dw, p)
 		n = i64(written)
 		if write_err != nil {
 			io_err, is_io := write_err.(io.Error)
@@ -1579,19 +1583,19 @@ deflate_writer_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p:
 		}
 		return
 	case .Flush:
-		if flush_err := deflate_writer_flush(dw); flush_err != nil {
+		if flush_err := writer_flush(dw); flush_err != nil {
 			io_err, is_io := flush_err.(io.Error)
 			err = io_err if is_io else .Unknown
 		}
 		return
 	case .Close:
-		if finish_err := deflate_writer_finish(dw); finish_err != nil {
+		if finish_err := writer_finish(dw); finish_err != nil {
 			io_err, is_io := finish_err.(io.Error)
 			err = io_err if is_io else .Unknown
 		}
 		return
 	case .Destroy:
-		deflate_writer_destroy(dw)
+		writer_destroy(dw)
 		return 0, nil
 	case .Query:
 		return io.query_utility({.Write, .Flush, .Close, .Destroy, .Query})

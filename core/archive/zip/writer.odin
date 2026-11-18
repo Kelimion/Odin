@@ -871,15 +871,15 @@ _chunk :: proc(zw: ^Writer) -> (chunk: []u8, err: Error) {
 _compress :: proc(zw: ^Writer, p: ^Pending_Entry, input: []u8, packed: ^[dynamic]u8, head: []u8) -> (head_len: int, err: Error) {
 	#partial switch p.method {
 	case .Deflate:
-		deflate.deflate_raw_to_dynamic(packed, input, deflate.Deflate_Level(p.level), _codec_options(zw), zw.allocator) or_return
+		deflate.compress_raw_to_dynamic(packed, input, deflate.Deflate_Level(p.level), _codec_options(zw), zw.allocator) or_return
 	case .Deflate64:
-		deflate.deflate64_raw_to_dynamic(packed, input, deflate.Deflate_Level(p.level), _codec_options(zw), zw.allocator) or_return
+		deflate.compress_raw64_to_dynamic(packed, input, deflate.Deflate_Level(p.level), _codec_options(zw), zw.allocator) or_return
 	case .BZip2:
 		bzip2.compress_to_dynamic(packed, input, bzip2.Level(p.level), _codec_options(zw), zw.allocator) or_return
 	case .LZMA:
-		options := lzma.level_options(lzma.Level(p.level))
-		options.end_marker = true
-		props   := lzma.compress_raw_to_dynamic(packed, input, options, zw.allocator) or_return
+		lzma_options := lzma.level_options(lzma.Level(p.level))
+		lzma_options.end_marker = true
+		props   := lzma.compress_raw_to_dynamic(packed, input, lzma_options, _codec_options(zw), zw.allocator) or_return
 		encoded := lzma.encode_properties(props)
 		head[0] = LZMA_SDK_VERSION[0]
 		head[1] = LZMA_SDK_VERSION[1]
@@ -887,7 +887,7 @@ _compress :: proc(zw: ^Writer, p: ^Pending_Entry, input: []u8, packed: ^[dynamic
 		head[3] = 0
 		head_len = 4 + copy(head[4:], encoded[:])
 	case .XZ:
-		xz.compress_to_dynamic(packed, input, xz.Level(p.level), {}, zw.allocator) or_return
+		xz.compress_to_dynamic(packed, input, xz.Level(p.level), {}, _codec_options(zw), zw.allocator) or_return
 	case .PPMd:
 		props   := ppmd.level_properties(.I, ppmd.Level(p.level), len(input))
 		encoded := ppmd.encode_properties_zip(props) or_return
@@ -912,9 +912,9 @@ _encoder_init :: proc(e: ^Encoder, zw: ^Writer, p: ^Pending_Entry, size: i64, w:
 	options := _codec_options(zw)
 	#partial switch p.method {
 	case .Deflate:
-		deflate.deflate_writer_init(&e.deflate, w, .Raw, deflate.Deflate_Level(p.level), options, zw.allocator) or_return
+		deflate.writer_init(&e.deflate, w, .Raw, deflate.Deflate_Level(p.level), options, zw.allocator) or_return
 	case .Deflate64:
-		deflate.deflate_writer_init(&e.deflate, w, .Raw64, deflate.Deflate_Level(p.level), options, zw.allocator) or_return
+		deflate.writer_init(&e.deflate, w, .Raw64, deflate.Deflate_Level(p.level), options, zw.allocator) or_return
 	case .BZip2:
 		bzip2.writer_init(&e.bzip2, w, bzip2.Level(p.level), options, zw.allocator) or_return
 	case .LZMA:
@@ -949,7 +949,7 @@ _encoder_write :: proc(e: ^Encoder, data: []u8) -> (err: Error) {
 			return write_err
 		}
 	case .Deflate, .Deflate64:
-		_ = deflate.deflate_writer_write(&e.deflate, data) or_return
+		_ = deflate.writer_write(&e.deflate, data) or_return
 	case .BZip2:
 		_ = bzip2.writer_write(&e.bzip2, data) or_return
 	case .LZMA:
@@ -966,7 +966,7 @@ _encoder_write :: proc(e: ^Encoder, data: []u8) -> (err: Error) {
 _encoder_finish :: proc(e: ^Encoder) -> (err: Error) {
 	#partial switch e.method {
 	case .Deflate, .Deflate64:
-		deflate.deflate_writer_finish(&e.deflate) or_return
+		deflate.writer_finish(&e.deflate) or_return
 	case .BZip2:
 		bzip2.writer_finish(&e.bzip2) or_return
 	case .LZMA:
@@ -981,7 +981,7 @@ _encoder_finish :: proc(e: ^Encoder) -> (err: Error) {
 
 @(private)
 _encoder_destroy :: proc(e: ^Encoder) {
-	deflate.deflate_writer_destroy(&e.deflate)
+	deflate.writer_destroy(&e.deflate)
 	bzip2.writer_destroy(&e.bzip2)
 	lzma.writer_destroy(&e.lzma)
 	ppmd.writer_destroy(&e.ppmd)

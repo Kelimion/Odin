@@ -15,6 +15,13 @@ compress_bound :: proc(length: int) -> int {
 	return HEADER_SIZE + length * 2 + COMPRESS_BOUND_SLACK
 }
 
+compress_raw_bound :: proc(length: int) -> int {
+	if length < 0 || length > (max(int) - COMPRESS_BOUND_SLACK) / 2 {
+		return -1
+	}
+	return length * 2 + COMPRESS_BOUND_SLACK
+}
+
 compress_lzma2_bound :: proc(length: int) -> int {
 	if length < 0 || length > max(int) - length / 4096 - COMPRESS_BOUND_SLACK {
 		return -1
@@ -35,57 +42,54 @@ level_options :: proc(level := Level.Default) -> (options: Options) {
 	return
 }
 
-compress_to_slice :: proc(output, input: []u8, level := Level.Default, allocator := context.allocator) -> (written: int, err: Error) {
-	if len(output) < HEADER_SIZE {
-		return 0, General_Error.Output_Too_Short
-	}
-	n, props := compress_raw_to_slice(output[HEADER_SIZE:], input, level_options(level), allocator) or_return
+compress_to_slice :: proc(output, input: []u8, level := Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (written: int, err: Error) {
+	props: Properties
+	written, props = encode_to_slice(output, input, level_options(level), HEADER_SIZE, false, options, allocator) or_return
 	write_header(output, props, u64(len(input)))
-	return n + HEADER_SIZE, nil
+	return written, nil
 }
 
-compress_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Level.Default, allocator := context.allocator) -> (err: Error) {
+compress_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Level.Default, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	if output == nil {
 		return General_Error.Incompatible_Options
 	}
-	props := encode_to_dynamic(output, input, level_options(level), HEADER_SIZE, false, allocator) or_return
+	props: Properties
+	props, err = encode_to_dynamic(output, input, level_options(level), HEADER_SIZE, false, options, allocator)
+	if err != nil {
+		non_zero_resize(output, 0)
+		return
+	}
 	write_header(output[:], props, u64(len(input)))
 	return nil
 }
 
-compress_raw_to_slice :: proc(output, input: []u8, options: Options, allocator := context.allocator) -> (written: int, props: Properties, err: Error) {
-	opts := normalize_options(options, len(input), false) or_return
-	rc   := Range_Encoder{buf = raw_data(output), cap = len(output), limit = len(output)}
-	written = encode_lzma(&rc, input, opts, allocator) or_return
-	return written, options_properties(opts), nil
+compress_raw_to_slice :: proc(output, input: []u8, lzma_options: Options, options: compress.Options = {}, allocator := context.allocator) -> (written: int, props: Properties, err: Error) {
+	return encode_to_slice(output, input, lzma_options, 0, false, options, allocator)
 }
 
-compress_raw_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, options: Options, allocator := context.allocator) -> (props: Properties, err: Error) {
+compress_raw_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, lzma_options: Options, options: compress.Options = {}, allocator := context.allocator) -> (props: Properties, err: Error) {
 	if output == nil {
 		return {}, General_Error.Incompatible_Options
 	}
-	return encode_to_dynamic(output, input, options, 0, false, allocator)
+	return encode_to_dynamic(output, input, lzma_options, 0, false, options, allocator)
 }
 
-compress_lzma2_to_slice :: proc(output, input: []u8, options: Options, allocator := context.allocator) -> (written: int, props: Properties, err: Error) {
-	opts := normalize_options(options, len(input), true) or_return
-	rc   := Range_Encoder{buf = raw_data(output), cap = len(output), limit = len(output)}
-	written = encode_lzma2(&rc, input, opts, allocator) or_return
-	return written, options_properties(opts), nil
+compress_lzma2_to_slice :: proc(output, input: []u8, lzma_options: Options, options: compress.Options = {}, allocator := context.allocator) -> (written: int, props: Properties, err: Error) {
+	return encode_to_slice(output, input, lzma_options, 0, true, options, allocator)
 }
 
-compress_lzma2_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, options: Options, allocator := context.allocator) -> (props: Properties, err: Error) {
+compress_lzma2_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, lzma_options: Options, options: compress.Options = {}, allocator := context.allocator) -> (props: Properties, err: Error) {
 	if output == nil {
 		return {}, General_Error.Incompatible_Options
 	}
-	return encode_to_dynamic(output, input, options, 0, true, allocator)
+	return encode_to_dynamic(output, input, lzma_options, 0, true, options, allocator)
 }
 
-compress_lzma2_append :: proc(output: ^[dynamic]u8, input: []u8, options: Options, allocator := context.allocator) -> (props: Properties, err: Error) {
+compress_lzma2_append :: proc(output: ^[dynamic]u8, input: []u8, lzma_options: Options, options: compress.Options = {}, allocator := context.allocator) -> (props: Properties, err: Error) {
 	if output == nil {
 		return {}, General_Error.Incompatible_Options
 	}
-	return encode_to_dynamic(output, input, options, len(output), true, allocator)
+	return encode_to_dynamic(output, input, lzma_options, len(output), true, options, allocator)
 }
 
 @(private)
@@ -107,33 +111,85 @@ options_properties :: proc "contextless" (options: Options) -> (props: Propertie
 }
 
 @(private)
-encode_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, options: Options, prefix: int, lzma2: bool, allocator: runtime.Allocator) -> (props: Properties, err: Error) {
+encode_to_slice :: proc(output, input: []u8, lzma_options: Options, prefix: int, lzma2: bool, options: compress.Options, allocator: runtime.Allocator) -> (written: int, props: Properties, err: Error) {
+	check_options(options) or_return
+	opts  := normalize_options(lzma_options, len(input), lzma2) or_return
+	limit := len(output)
+	if options.max_output_size > 0 {
+		limit = min(limit, options.max_output_size)
+	}
+	if limit < prefix {
+		return 0, {}, General_Error.Output_Too_Short
+	}
+	encoder_check_memory(opts, len(input), lzma2, options) or_return
+
+	rc := Range_Encoder{start = prefix, pos = prefix, buf = raw_data(output), cap = limit, limit = limit}
+	n: int
+	if lzma2 {
+		n = encode_lzma2(&rc, input, opts, options, allocator) or_return
+	} else {
+		n = encode_lzma(&rc, input, opts, options, allocator) or_return
+	}
+	return prefix + n, options_properties(opts), nil
+}
+
+@(private)
+encode_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, lzma_options: Options, prefix: int, lzma2: bool, options: compress.Options, allocator: runtime.Allocator) -> (props: Properties, err: Error) {
 	context.allocator = allocator
-	opts  := normalize_options(options, len(input), lzma2) or_return
-	bound := compress_lzma2_bound(len(input)) if lzma2 else compress_bound(len(input))
+	check_options(options) or_return
+	opts  := normalize_options(lzma_options, len(input), lzma2) or_return
+	bound := compress_lzma2_bound(len(input)) if lzma2 else compress_raw_bound(len(input))
 	if bound < 0 {
 		return {}, LZMA_Error.Input_Too_Large
 	}
-	limit := compress.COMPRESS_OUTPUT_ALLOCATE_MAX
+	limit := compress.output_limit(options)
 	if prefix > limit {
 		return {}, General_Error.Output_Too_Short
 	}
+	encoder_check_memory(opts, len(input), lzma2, options) or_return
 	reservation := min(compress.output_reservation(compress_lzma2_bound(len(input)), bound, len(input)) + prefix, limit)
 	non_zero_resize(output, reservation) or_return
 
 	rc := Range_Encoder{start = prefix, pos = prefix, buf = raw_data(output^), cap = len(output^), grow = output, limit = limit}
 	written: int
 	if lzma2 {
-		written, err = encode_lzma2(&rc, input, opts, allocator)
+		written, err = encode_lzma2(&rc, input, opts, options, allocator)
 	} else {
-		written, err = encode_lzma(&rc, input, opts, allocator)
+		written, err = encode_lzma(&rc, input, opts, options, allocator)
 	}
 	if err != nil {
-		non_zero_resize(output, 0)
+		non_zero_resize(output, prefix)
 		return
 	}
 	non_zero_resize(output, prefix + written)
 	return options_properties(opts), nil
+}
+
+@(private)
+encoder_check_memory :: proc "contextless" (opts: Options, input_size: int, lzma2: bool, options: compress.Options) -> (err: Error) {
+	if u64(size_of(Encoder)) + encoder_memory(opts, u64(input_size), lzma2) > u64(compress.memory_limit(options)) {
+		return General_Error.Memory_Limit_Exceeded
+	}
+	return nil
+}
+
+@(private)
+encoder_progress :: proc(e: ^Encoder, options: compress.Options, mark: ^i64, total_in: int) -> (err: Error) {
+	position := i64(e.now_pos64)
+	if position < mark^ {
+		return nil
+	}
+	interval := i64(compress.progress_interval(options))
+	mark^ = position + interval if interval <= max(i64) - position else max(i64)
+	return compress.report_progress(options, position, i64(e.rc.pos), i64(total_in), -1)
+}
+
+@(private)
+encoder_progress_mark :: proc "contextless" (options: compress.Options) -> (mark: i64) {
+	if options.progress == nil {
+		return max(i64)
+	}
+	return i64(compress.progress_interval(options))
 }
 
 @(private)
@@ -210,7 +266,7 @@ encoder_memory :: proc "contextless" (opts: Options, expected_size: u64, lzma2: 
 	if lzma2 {
 		lit *= 2
 	}
-	return size_of(Writer_State) + refs * size_of(u32) + lit
+	return refs * size_of(u32) + lit
 }
 
 @(private)
@@ -1677,7 +1733,7 @@ code_one_block :: proc(e: ^Encoder, max_pack_size, max_unpack_size: u32) #no_bou
 }
 
 @(private)
-encode_lzma :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: runtime.Allocator) -> (written: int, err: Error) {
+encode_lzma :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, options: compress.Options, allocator: runtime.Allocator) -> (written: int, err: Error) {
 	context.allocator = allocator
 	e := new(Encoder) or_return
 	defer free(e)
@@ -1686,8 +1742,12 @@ encode_lzma :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: r
 	e.input = input
 	encoder_create(e, opts, u64(len(input)), false) or_return
 
+	mark := encoder_progress_mark(options)
 	for !e.finished && e.rc.grow_err == nil && e.rc.pos <= e.rc.cap {
 		code_one_block(e, 0, 0)
+		if !e.finished && e.rc.grow_err == nil && e.rc.pos <= e.rc.cap {
+			encoder_progress(e, options, &mark, len(input)) or_return
+		}
 	}
 	rc^ = e.rc
 
@@ -1701,11 +1761,12 @@ encode_lzma :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: r
 	if e.now_pos64 != u64(len(input)) {
 		return written, General_Error.Output_Too_Short
 	}
+	err = compress.report_progress(options, i64(len(input)), i64(rc.pos), i64(len(input)), -1)
 	return
 }
 
 @(private)
-encode_lzma2 :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: runtime.Allocator) -> (written: int, err: Error) #no_bounds_check {
+encode_lzma2 :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, options: compress.Options, allocator: runtime.Allocator) -> (written: int, err: Error) #no_bounds_check {
 	context.allocator = allocator
 	e := new(Encoder) or_return
 	defer free(e)
@@ -1718,6 +1779,7 @@ encode_lzma2 :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: 
 	out       := &e.rc
 	out_start := out.pos
 	chunker   := lzma2_chunker_init(opts)
+	mark      := encoder_progress_mark(options)
 
 	for chunker.src_pos < i64(len(input)) {
 		unpack_size, chunk_err := lzma2_chunk(e, &chunker)
@@ -1729,6 +1791,9 @@ encode_lzma2 :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: 
 		}
 		if unpack_size == 0 {
 			break
+		}
+		if chunker.src_pos < i64(len(input)) {
+			encoder_progress(e, options, &mark, len(input)) or_return
 		}
 	}
 
@@ -1743,7 +1808,7 @@ encode_lzma2 :: proc(rc: ^Range_Encoder, input: []u8, opts: Options, allocator: 
 	}
 	out.buf[out.pos] = 0
 	out.pos += 1
-	return out.pos - out_start, nil
+	return out.pos - out_start, compress.report_progress(options, i64(len(input)), i64(out.pos), i64(len(input)), -1)
 }
 
 @(private)

@@ -149,13 +149,6 @@ General_Error :: enum {
 
 	Allocation_Failed,
 	Memory_Limit_Exceeded,
-
-	// For buffered instead of streamed output, the payload size can't exceed
-	// the max set by the `COMPRESS_OUTPUT_ALLOCATE_MAX` switch in compress/common.odin.
-	//
-	// You can tweak this setting using `-define:COMPRESS_OUTPUT_ALLOCATE_MAX=size_in_bytes`
-
-	Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX,
 }
 
 GZIP_Error :: enum {
@@ -179,7 +172,6 @@ LZ4_Error :: enum {
 	Header_Checksum_Failed,
 	Block_Checksum_Failed,
 	Content_Checksum_Failed,
-	Content_Size_Mismatch,
 	Block_Too_Large,
 	Dictionary_Required,
 	Invalid_Offset,
@@ -238,7 +230,6 @@ PPMd_Error :: enum {
 BCJ2_Error :: enum {
 	None = 0,
 	Corrupt_Data,
-	Size_Mismatch,
 }
 
 XZ_Error :: enum {

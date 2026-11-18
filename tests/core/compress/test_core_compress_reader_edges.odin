@@ -68,11 +68,11 @@ edge_pack :: proc(codec: Edge_Codec, text: []byte, packed: ^[dynamic]byte) -> (p
 	case .LZ4:
 		err = lz4.compress_frame(packed, text, .Level_1, {block_max_size = .Max_64KiB, flags = lz4.DEFAULT_FRAME_FLAGS})
 	case .Inflate:
-		err = deflate.deflate_gzip(packed, text)
+		err = deflate.compress_gzip(packed, text)
 		if err == nil {
 			empty: [dynamic]byte
 			defer delete(empty)
-			err = deflate.deflate_gzip(&empty, nil)
+			err = deflate.compress_gzip(&empty, nil)
 			append(packed, ..empty[:])
 		}
 	case .LZMA:
@@ -96,7 +96,7 @@ edge_unpack :: proc(codec: Edge_Codec, pull: bool, packed: []byte, props: Edge_P
 		switch codec {
 		case .BZip2:   return bzip2.decompress_to_writer(w, &ctx, -1, options)
 		case .LZ4:     return lz4.decompress_frame_to_writer(w, &ctx, -1, options)
-		case .Inflate: return deflate.inflate_gzip_to_writer(w, &ctx, -1, options)
+		case .Inflate: return deflate.decompress_gzip_to_writer(w, &ctx, -1, options)
 		case .LZMA:    return lzma.decompress_raw_to_writer(w, &ctx, props.lzma, -1, options)
 		case .PPMd:    return ppmd.decompress_to_writer(w, &ctx, props.ppmd, -1, options)
 		}
@@ -116,10 +116,10 @@ edge_unpack :: proc(codec: Edge_Codec, pull: bool, packed: []byte, props: Edge_P
 		lz4.frame_reader_init(&r, &ctx, -1, options) or_return
 		return edge_drain(&r, lz4.frame_reader_read, buffer, output)
 	case .Inflate:
-		r: deflate.Inflate_Reader
-		defer deflate.inflate_reader_destroy(&r)
-		deflate.inflate_reader_init(&r, &ctx, .Gzip, -1, options) or_return
-		return edge_drain(&r, deflate.inflate_reader_read, buffer, output)
+		r: deflate.Reader
+		defer deflate.reader_destroy(&r)
+		deflate.reader_init(&r, &ctx, .Gzip, -1, options) or_return
+		return edge_drain(&r, deflate.reader_read, buffer, output)
 	case .LZMA:
 		r: lzma.Reader
 		defer lzma.reader_destroy(&r)
@@ -192,16 +192,16 @@ reader_empty_read_before_error :: proc(t: ^testing.T) {
 	{
 		packed: [dynamic]byte
 		defer delete(packed)
-		testing.expect_value(t, deflate.deflate_gzip(&packed, data), nil)
+		testing.expect_value(t, deflate.compress_gzip(&packed, data), nil)
 		packed[len(packed) - 8] ~= 0x55
 		input := packed[:]
 		ctx := compress.init_context(&input)
-		r: deflate.Inflate_Reader
-		defer deflate.inflate_reader_destroy(&r)
-		testing.expect_value(t, deflate.inflate_reader_init(&r, &ctx, .Gzip), nil)
-		output, final := empty_read_drain(t, "inflate", &r, deflate.inflate_reader_read,
-			proc(r: ^deflate.Inflate_Reader) -> bool { return r.flushed < r.written },
-			proc(r: ^deflate.Inflate_Reader) -> compress.Error { return r.err })
+		r: deflate.Reader
+		defer deflate.reader_destroy(&r)
+		testing.expect_value(t, deflate.reader_init(&r, &ctx, .Gzip), nil)
+		output, final := empty_read_drain(t, "inflate", &r, deflate.reader_read,
+			proc(r: ^deflate.Reader) -> bool { return r.flushed < r.written },
+			proc(r: ^deflate.Reader) -> compress.Error { return r.err })
 		defer delete(output)
 		testing.expect_value(t, final, compress.Error(compress.GZIP_Error.Payload_CRC_Invalid))
 		testing.expect(t, bytes.equal(output[:], data), "inflate: output differs")

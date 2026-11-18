@@ -1191,7 +1191,7 @@ _pack_lzma :: proc(sw: ^Writer, data: []u8, coder: ^Out_Coder, stream: int) -> (
 	packed: [dynamic]u8
 	packed.allocator = sw.allocator
 	defer delete(packed)
-	props   := lzma.compress_raw_to_dynamic(&packed, data, BCJ2_LZMA_OPTIONS, sw.allocator) or_return
+	props   := lzma.compress_raw_to_dynamic(&packed, data, BCJ2_LZMA_OPTIONS, allocator = sw.allocator) or_return
 	encoded := lzma.encode_properties(props)
 	coder.properties_size = copy(coder.properties[:], encoded[:])
 	return _pack_emit(sw, packed[:], stream)
@@ -1270,9 +1270,9 @@ _encoder_init :: proc(e: ^Encoder, sw: ^Writer, setup: Coder_Setup, size, hint: 
 	case .BZip2:
 		bzip2.writer_init(&e.bzip2, w, bzip2.Level(setup.level), options, sw.allocator) or_return
 	case .Deflate:
-		deflate.deflate_writer_init(&e.deflate, w, .Raw, deflate.Deflate_Level(setup.level), options, sw.allocator) or_return
+		deflate.writer_init(&e.deflate, w, .Raw, deflate.Deflate_Level(setup.level), options, sw.allocator) or_return
 	case .Deflate64:
-		deflate.deflate_writer_init(&e.deflate, w, .Raw64, deflate.Deflate_Level(setup.level), options, sw.allocator) or_return
+		deflate.writer_init(&e.deflate, w, .Raw64, deflate.Deflate_Level(setup.level), options, sw.allocator) or_return
 	}
 	return 0, nil
 }
@@ -1285,7 +1285,7 @@ _encoder_write :: proc(e: ^Encoder, data: []u8) -> (err: Error) {
 			return write_err
 		}
 	case .Deflate, .Deflate64:
-		_ = deflate.deflate_writer_write(&e.deflate, data) or_return
+		_ = deflate.writer_write(&e.deflate, data) or_return
 	case .BZip2:
 		_ = bzip2.writer_write(&e.bzip2, data) or_return
 	case .LZMA, .LZMA2:
@@ -1300,7 +1300,7 @@ _encoder_write :: proc(e: ^Encoder, data: []u8) -> (err: Error) {
 _encoder_finish :: proc(e: ^Encoder) -> (err: Error) {
 	#partial switch e.method {
 	case .Deflate, .Deflate64:
-		deflate.deflate_writer_finish(&e.deflate) or_return
+		deflate.writer_finish(&e.deflate) or_return
 	case .BZip2:
 		bzip2.writer_finish(&e.bzip2) or_return
 	case .LZMA, .LZMA2:
@@ -1313,7 +1313,7 @@ _encoder_finish :: proc(e: ^Encoder) -> (err: Error) {
 
 @(private)
 _encoder_destroy :: proc(e: ^Encoder) {
-	deflate.deflate_writer_destroy(&e.deflate)
+	deflate.writer_destroy(&e.deflate)
 	bzip2.writer_destroy(&e.bzip2)
 	lzma.writer_destroy(&e.lzma)
 	ppmd.writer_destroy(&e.ppmd)
@@ -2018,7 +2018,7 @@ _encode_header :: proc(sw: ^Writer) -> (err: Error) {
 	main^ = {id = .Copy, in_streams = 1, unpack_size = i64(size)}
 	data := sw.header[:]
 	if !sw.options.plain_header {
-		props   := lzma.compress_raw_to_dynamic(&packed, sw.header[:], HEADER_LZMA_OPTIONS, sw.allocator) or_return
+		props   := lzma.compress_raw_to_dynamic(&packed, sw.header[:], HEADER_LZMA_OPTIONS, allocator = sw.allocator) or_return
 		encoded := lzma.encode_properties(props)
 		main.id              = .LZMA
 		main.properties_size = copy(main.properties[:], encoded[:])

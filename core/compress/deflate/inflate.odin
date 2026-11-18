@@ -7,10 +7,10 @@ import "core:hash"
 import "core:io"
 import "core:simd"
 
-inflate_raw  :: proc{inflate_raw_from_context, inflate_raw_from_bytes}
-inflate_zlib :: proc{inflate_zlib_from_context, inflate_zlib_from_bytes}
+decompress_raw  :: proc{decompress_raw_from_context, decompress_raw_from_bytes}
+decompress_zlib :: proc{decompress_zlib_from_context, decompress_zlib_from_bytes}
 
-inflate_raw_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_raw_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
 	p: Inflate_Progress
 	inflate_progress_init(&p, z, expected_output_size, options) or_return
@@ -21,7 +21,7 @@ inflate_raw_from_context :: proc(z: ^compress.Context, expected_output_size := -
 	return inflate_progress_step(&p, p.bytes_in, i64(len(output)))
 }
 
-inflate_zlib_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_zlib_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
 	p: Inflate_Progress
 	inflate_progress_init(&p, z, expected_output_size, options) or_return
@@ -46,33 +46,33 @@ inflate_zlib_from_context :: proc(z: ^compress.Context, expected_output_size := 
 	return inflate_progress_step(&p, p.bytes_in, i64(len(output)))
 }
 
-inflate_raw_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_raw_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return inflate_raw_from_context(&ctx, expected_output_size, options, allocator)
+	return decompress_raw_from_context(&ctx, expected_output_size, options, allocator)
 }
 
-inflate_zlib_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_zlib_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return inflate_zlib_from_context(&ctx, expected_output_size, options, allocator)
+	return decompress_zlib_from_context(&ctx, expected_output_size, options, allocator)
 }
 
-inflate_raw_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_raw_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	return inflate_stream_to_writer(w, z, .Raw, expected_output_size, options, allocator)
 }
 
-inflate_zlib_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+decompress_zlib_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	return inflate_stream_to_writer(w, z, .Zlib, expected_output_size, options, allocator)
 }
 
-inflate_reader_init :: proc(r: ^Inflate_Reader, z: ^compress.Context, format: Inflate_Format, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
+reader_init :: proc(r: ^Reader, z: ^compress.Context, format: Format, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	err   = inflate_stream_init(r, z, format, expected_output_size, options, allocator)
 	r.err = err
 	return
 }
 
-inflate_reader_read :: proc(r: ^Inflate_Reader, p: []u8) -> (n: int, err: Error) {
+reader_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: Error) {
 	was_done := r.done
 	for n < len(p) {
 		if r.flushed < r.written {
@@ -102,13 +102,13 @@ inflate_reader_read :: proc(r: ^Inflate_Reader, p: []u8) -> (n: int, err: Error)
 	return 0, nil
 }
 
-inflate_reader_to_stream :: proc(r: ^Inflate_Reader) -> (s: io.Stream) {
+reader_to_stream :: proc(r: ^Reader) -> (s: io.Stream) {
 	s.data      = r
 	s.procedure = inflate_reader_stream_proc
 	return
 }
 
-inflate_reader_destroy :: proc(r: ^Inflate_Reader) {
+reader_destroy :: proc(r: ^Reader) {
 	if r.owns_window {
 		delete(r.window, r.allocator)
 	}
@@ -1112,10 +1112,10 @@ inflate_to_buffer :: proc(z: ^compress.Context, expected_output_size: int, p: ^I
 
 @(private)
 inflate_reader_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
-	r := (^Inflate_Reader)(stream_data)
+	r := (^Reader)(stream_data)
 	#partial switch mode {
 	case .Read:
-		read, read_err := inflate_reader_read(r, p)
+		read, read_err := reader_read(r, p)
 		n = i64(read)
 		if read_err != nil {
 			io_err, is_io := read_err.(io.Error)
@@ -1123,7 +1123,7 @@ inflate_reader_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p:
 		}
 		return
 	case .Destroy:
-		inflate_reader_destroy(r)
+		reader_destroy(r)
 		return 0, nil
 	case .Query:
 		return io.query_utility({.Read, .Destroy, .Query})

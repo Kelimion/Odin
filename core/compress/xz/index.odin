@@ -58,19 +58,19 @@ find_block :: proc(index: ^Index, uncompressed_offset: i64) -> (block: int, ok: 
 	return lo - 1, true
 }
 
-decompress_block_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, index: ^Index, block: int, flags := Decode_Flags{}, allocator := context.allocator) -> (err: Error) {
+decompress_block_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, index: ^Index, block: int, flags := Decode_Flags{}, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	b, check_id := _index_block(output, index, block) or_return
+	b, check_id := _index_block(output, index, block, options) or_return
 	padded := _padded_size(b.unpadded_size)
 	if b.compressed_offset > i64(len(input)) || padded > i64(len(input)) - b.compressed_offset {
 		return General_Error.Stream_Too_Short
 	}
-	return _decode_indexed_block(output, input[int(b.compressed_offset):][:int(padded)], b, check_id, flags)
+	return _decode_indexed_block(output, input[int(b.compressed_offset):][:int(padded)], b, check_id, flags, options, compress.memory_limit(options))
 }
 
-decompress_block_from_stream :: proc(output: ^[dynamic]u8, input: io.Stream, index: ^Index, block: int, flags := Decode_Flags{}, allocator := context.allocator) -> (err: Error) {
+decompress_block_from_stream :: proc(output: ^[dynamic]u8, input: io.Stream, index: ^Index, block: int, flags := Decode_Flags{}, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
-	b, check_id := _index_block(output, index, block) or_return
+	b, check_id := _index_block(output, index, block, options) or_return
 	padded := _padded_size(b.unpadded_size)
 	size := io.size(input) or_return
 	if b.compressed_offset > size || padded > size - b.compressed_offset {
@@ -78,6 +78,10 @@ decompress_block_from_stream :: proc(output: ^[dynamic]u8, input: io.Stream, ind
 	}
 	if padded > i64(max(int)) {
 		return XZ_Error.Input_Too_Large
+	}
+	limit := compress.memory_limit(options)
+	if padded > i64(limit) {
+		return General_Error.Memory_Limit_Exceeded
 	}
 	data := make([]u8, int(padded)) or_return
 	defer delete(data)
@@ -88,7 +92,7 @@ decompress_block_from_stream :: proc(output: ^[dynamic]u8, input: io.Stream, ind
 	if read_err != nil {
 		return read_err
 	}
-	return _decode_indexed_block(output, data, b, check_id, flags)
+	return _decode_indexed_block(output, data, b, check_id, flags, options, max(limit - int(padded), 1))
 }
 
 @(private)
@@ -262,24 +266,25 @@ _parse_index :: proc(data: []u8, blocks: []Block_Info) -> (summary: Index_Summar
 }
 
 @(private)
-_index_block :: proc(output: ^[dynamic]u8, index: ^Index, block: int) -> (b: Block_Info, check_id: u8, err: Error) {
+_index_block :: proc(output: ^[dynamic]u8, index: ^Index, block: int, options: compress.Options) -> (b: Block_Info, check_id: u8, err: Error) {
 	if output == nil || index == nil || block < 0 || block >= len(index.blocks) {
 		return {}, 0, General_Error.Incompatible_Options
 	}
+	_check_options(options) or_return
 	b = index.blocks[block]
 	if b.stream < 0 || b.stream >= len(index.streams) || b.compressed_offset < 0 || b.uncompressed_size < 0 ||
 	   b.unpadded_size < UNPADDED_SIZE_MIN || u64(b.unpadded_size) > UNPADDED_SIZE_MAX {
 		return {}, 0, XZ_Error.Invalid_Index
 	}
+	if b.uncompressed_size > i64(compress.output_limit(options)) {
+		return {}, 0, General_Error.Output_Too_Short
+	}
 	return b, index.streams[b.stream].check_id & 0x0F, nil
 }
 
 @(private)
-_decode_indexed_block :: proc(output: ^[dynamic]u8, data: []u8, b: Block_Info, check_id: u8, flags: Decode_Flags) -> (err: Error) {
+_decode_indexed_block :: proc(output: ^[dynamic]u8, data: []u8, b: Block_Info, check_id: u8, flags: Decode_Flags, options: compress.Options, max_memory: int) -> (err: Error) {
 	clear(output)
-	if b.uncompressed_size > i64(compress.COMPRESS_OUTPUT_ALLOCATE_MAX) {
-		return General_Error.Output_Too_Short
-	}
 	if data[0] == 0 {
 		return XZ_Error.Index_Mismatch
 	}
@@ -288,6 +293,9 @@ _decode_indexed_block :: proc(output: ^[dynamic]u8, data: []u8, b: Block_Info, c
 		output          = output,
 		flags           = flags,
 		max_output_size = int(b.uncompressed_size),
+		max_memory      = max_memory,
+		total_out       = int(b.uncompressed_size),
+		options         = options,
 		check_id        = check_id,
 	}
 	lzma.lzma2_decoder_init(&d.lzma2)

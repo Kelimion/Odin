@@ -339,8 +339,8 @@ d64_unpack :: proc(t: ^testing.T, format: D64_Format, kind: Stream_Kind, input: 
 	ctx := stream_test_context(kind, &input, &br, &tr, output)
 	defer compress.destroy_context(&ctx)
 	switch format {
-	case .Deflate:   return deflate.inflate_raw(&ctx, expected, options)
-	case .Deflate64: return deflate.inflate64_raw(&ctx, expected, options)
+	case .Deflate:   return deflate.decompress_raw(&ctx, expected, options)
+	case .Deflate64: return deflate.decompress_raw64(&ctx, expected, options)
 	}
 	return nil
 }
@@ -390,12 +390,12 @@ d64_round_trip :: proc(t: ^testing.T, name: string, data: []byte) {
 	for level in D64_TEST_LEVELS {
 		packed: [dynamic]byte
 		defer delete(packed)
-		err := deflate.deflate64_raw(&packed, data, level)
+		err := deflate.compress_raw64(&packed, data, level)
 		testing.expectf(t, err == nil, "%v, %v: deflate64 returned %v", name, level, err)
 		if err != nil {
 			continue
 		}
-		testing.expectf(t, len(packed) <= deflate.deflate64_bound(len(data)), "%v, %v: %v bytes over the bound", name, level, len(packed))
+		testing.expectf(t, len(packed) <= deflate.compress_raw64_bound(len(data)), "%v, %v: %v bytes over the bound", name, level, len(packed))
 		for kind in Stream_Kind {
 			output: [dynamic]byte
 			defer delete(output)
@@ -441,12 +441,12 @@ deflate64_far_distances :: proc(t: ^testing.T) {
 		for level in ([]deflate.Deflate_Level{.Level_1, .Level_6, .Level_10}) {
 			packed: [dynamic]byte
 			defer delete(packed)
-			testing.expect_value(t, deflate.deflate64_raw(&packed, data, level), nil)
+			testing.expect_value(t, deflate.compress_raw64(&packed, data, level), nil)
 			slack := period / 2 if level == .Level_1 else period / 8
 			testing.expectf(t, len(packed) < period + slack, "period %v, %v: %v bytes", period, level, len(packed))
 			output: [dynamic]byte
 			defer delete(output)
-			testing.expect_value(t, deflate.inflate64_raw(&output, packed[:]), nil)
+			testing.expect_value(t, deflate.decompress_raw64(&output, packed[:]), nil)
 			testing.expectf(t, bytes.equal(output[:], data), "period %v, %v: output differs", period, level)
 		}
 	}
@@ -462,11 +462,11 @@ deflate64_long_matches :: proc(t: ^testing.T) {
 		}
 		packed: [dynamic]byte
 		defer delete(packed)
-		testing.expect_value(t, deflate.deflate64_raw(&packed, data, level), nil)
+		testing.expect_value(t, deflate.compress_raw64(&packed, data, level), nil)
 		testing.expectf(t, len(packed) < 400, "%v: %v bytes for 1 MiB of zeros", level, len(packed))
 		output: [dynamic]byte
 		defer delete(output)
-		testing.expect_value(t, deflate.inflate64_raw(&output, packed[:]), nil)
+		testing.expect_value(t, deflate.decompress_raw64(&output, packed[:]), nil)
 		testing.expectf(t, bytes.equal(output[:], data), "%v: output differs", level)
 	}
 }
@@ -479,23 +479,23 @@ deflate64_slice_api :: proc(t: ^testing.T) {
 
 	s := new(deflate.Deflate64)
 	defer free(s)
-	bound := deflate.deflate64_bound(len(data))
-	testing.expect_value(t, bound, deflate.deflate_bound(len(data)))
+	bound := deflate.compress_raw64_bound(len(data))
+	testing.expect_value(t, bound, deflate.compress_raw_bound(len(data)))
 	out := make([]byte, bound)
 	defer delete(out)
 
-	written, err := deflate.deflate64_raw(s, out, data[:], .Level_9)
+	written, err := deflate.compress_raw64(s, out, data[:], .Level_9)
 	testing.expect_value(t, err, nil)
 	output: [dynamic]byte
 	defer delete(output)
-	testing.expect_value(t, deflate.inflate64_raw(&output, out[:written]), nil)
+	testing.expect_value(t, deflate.decompress_raw64(&output, out[:written]), nil)
 	testing.expect(t, bytes.equal(output[:], data[:]))
 
-	exact, exact_err := deflate.deflate64_raw(s, out[:written], data[:], .Level_9)
+	exact, exact_err := deflate.compress_raw64(s, out[:written], data[:], .Level_9)
 	testing.expectf(t, exact_err == nil && exact == written, "exact size: %v, %v", exact, exact_err)
-	_, short_err := deflate.deflate64_raw(s, out[:written - 1], data[:], .Level_9)
+	_, short_err := deflate.compress_raw64(s, out[:written - 1], data[:], .Level_9)
 	testing.expect_value(t, short_err, compress.General_Error.Output_Too_Short)
-	_, nil_err := deflate.deflate64_raw((^deflate.Deflate64)(nil), out, data[:], .Level_9)
+	_, nil_err := deflate.compress_raw64((^deflate.Deflate64)(nil), out, data[:], .Level_9)
 	testing.expect_value(t, nil_err, compress.General_Error.Incompatible_Options)
 }
 
@@ -598,7 +598,7 @@ deflate64_length_285 :: proc(t: ^testing.T) {
 
 		output_8: [dynamic]byte
 		defer delete(output_8)
-		if deflate.inflate_raw(&output_8, b.buf[:]) == nil {
+		if deflate.decompress_raw(&output_8, b.buf[:]) == nil {
 			testing.expectf(t, !bytes.equal(output_8[:], expected[:]), "extra %v: method 8 decoded code 285 like Deflate64", extra)
 		}
 	}
@@ -743,7 +743,7 @@ deflate64_truncated :: proc(t: ^testing.T) {
 	d64_test_data(3, 150000, &data)
 	packed: [dynamic]byte
 	defer delete(packed)
-	testing.expect_value(t, deflate.deflate64_raw(&packed, data[:], .Level_6), nil)
+	testing.expect_value(t, deflate.compress_raw64(&packed, data[:], .Level_6), nil)
 
 	step := max(len(packed) / 97, 1)
 	for n := 0; n < len(packed); n += step {
@@ -762,7 +762,7 @@ deflate64_limits :: proc(t: ^testing.T) {
 	defer delete(data)
 	packed: [dynamic]byte
 	defer delete(packed)
-	testing.expect_value(t, deflate.deflate64_raw(&packed, data, .Level_6), nil)
+	testing.expect_value(t, deflate.compress_raw64(&packed, data, .Level_6), nil)
 
 	for kind in Stream_Kind {
 		for expected in ([]int{len(data), 100, 65537}) {
@@ -824,7 +824,7 @@ deflate64_expansion_reservation :: proc(t: ^testing.T) {
 		defer mem.tracking_allocator_destroy(&tracking)
 
 		output: [dynamic]byte
-		err := deflate.inflate64_raw(&output, b.buf[:], hint, allocator = mem.tracking_allocator(&tracking))
+		err := deflate.decompress_raw64(&output, b.buf[:], hint, allocator = mem.tracking_allocator(&tracking))
 		if hint == size {
 			testing.expectf(t, err == nil, "hint %v: %v", hint, err)
 			testing.expectf(t, len(output) == size, "hint %v: %v bytes", hint, len(output))
@@ -1314,7 +1314,7 @@ deflate64_fuzz_packed :: proc(t: ^testing.T) {
 		level := deflate.Deflate_Level(rand.int_max(11))
 		packed: [dynamic]byte
 		defer delete(packed)
-		testing.expect_value(t, deflate.deflate64_raw(&packed, data[:], level), nil)
+		testing.expect_value(t, deflate.compress_raw64(&packed, data[:], level), nil)
 
 		reference: [dynamic]byte
 		defer delete(reference)

@@ -340,7 +340,7 @@ Node :: struct {
 	lzma:        lzma.Reader,
 	ppmd:        ppmd.Reader,
 	bzip2:       bzip2.Reader,
-	inflate:     deflate.Inflate_Reader,
+	inflate:     deflate.Reader,
 	filter:      filters.Reader,
 	bcj2:        filters.Bcj2_Reader,
 	buffer:      []u8,
@@ -545,7 +545,7 @@ Pack_Sink :: struct {
 Encoder :: struct {
 	method:  archive.Method,
 	w:       io.Writer,
-	deflate: deflate.Deflate_Writer,
+	deflate: deflate.Writer,
 	bzip2:   bzip2.Writer,
 	lzma:    lzma.Writer,
 	ppmd:    ppmd.Writer,

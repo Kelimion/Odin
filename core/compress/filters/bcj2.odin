@@ -10,7 +10,7 @@ bcj2_decode :: proc{bcj2_decode_to_slice, bcj2_decode_to_dynamic}
 bcj2_decode_to_slice :: proc(output: []u8, main, call, jump, rc: []u8) -> (err: Error) {
 	rest := len(output) - len(main)
 	if rest < 0 || len(call) > rest || len(jump) != rest - len(call) {
-		return BCJ2_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	return bcj2_decode_streams(output, main, call, jump, rc)
 }
@@ -20,7 +20,7 @@ bcj2_decode_to_dynamic :: proc(output: ^[dynamic]u8, main, call, jump, rc: []u8,
 		return General_Error.Incompatible_Options
 	}
 	if len(call) > max(int) - len(main) || len(jump) > max(int) - len(main) - len(call) {
-		return BCJ2_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	context.allocator = allocator
 	non_zero_resize(output, len(main) + len(call) + len(jump)) or_return

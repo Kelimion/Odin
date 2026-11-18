@@ -6,25 +6,28 @@ import "core:compress"
 
 unshrink :: proc{unshrink_from_bytes, unshrink_from_context}
 
-unshrink_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+unshrink_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	input := input
 	ctx   := compress.init_context_from_slice(&input, output=output)
-	return unshrink_from_context(&ctx, expected_output_size, max_output_size, allocator)
+	return unshrink_from_context(&ctx, expected_output_size, options, allocator)
 }
 
-unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
+unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
 	context.allocator = allocator
 	if z.output == nil {
 		return General_Error.Incompatible_Options
 	}
 
-	expected := output_limit(z, expected_output_size, max_output_size, compress.SHRINK_EXPANSION_MAX) or_return
+	expected := output_limit(z, expected_output_size, options, compress.SHRINK_EXPANSION_MAX, size_of(Unshrink) + size_of(Unshrink_Cache)) or_return
 	if expected == 0 {
 		return nil
 	}
 
 	start := len(z.output)
 	defer z.bytes_written = i64(len(z.output) - start)
+
+	p: Output_Progress
+	progress_begin(&p, z, expected, options)
 
 	raw := runtime.mem_alloc_non_zeroed(size_of(Unshrink), align_of(Unshrink)) or_return
 	s   := (^Unshrink)(raw_data(raw))
@@ -48,7 +51,7 @@ unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, 
 	o := out_load(z)
 	defer out_store(z, &o)
 
-	previous, available := unshrink_read_code_bits(z, &b, s, &code_size, &next_free) or_return
+	previous, available := unshrink_read_code_bits(z, &p.pulled, &b, s, &code_size, &next_free) or_return
 	if available {
 		if previous > 255 {
 			return PKZIP_Legacy_Error.Invalid_First_Code
@@ -60,8 +63,11 @@ unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, 
 	previous_length := 1
 
 	for available && o.at - start < expected {
+		if o.at - start >= p.mark {
+			progress_report(&p, z, o.at - start, b.count) or_return
+		}
 		code: int
-		code, available = unshrink_read_code_bits(z, &b, s, &code_size, &next_free) or_return
+		code, available = unshrink_read_code_bits(z, &p.pulled, &b, s, &code_size, &next_free) or_return
 		if !available {
 			break
 		}
@@ -127,6 +133,9 @@ unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, 
 	if o.at - start != expected {
 		return General_Error.Stream_Too_Short
 	}
+	if o.at - start >= p.mark {
+		return progress_report(&p, z, o.at - start, b.count)
+	}
 	return nil
 }
 
@@ -150,15 +159,15 @@ unshrink_init :: proc(s: ^Unshrink) {
 }
 
 @(private)
-unshrink_read_code :: proc(z: ^compress.Context, s: ^Unshrink, code_size: ^uint, next_free: ^int) -> (code: int, available: bool, err: Error) {
+unshrink_read_code :: proc(z: ^compress.Context, pulled: ^i64, s: ^Unshrink, code_size: ^uint, next_free: ^int) -> (code: int, available: bool, err: Error) {
 	for {
-		code, available = read_bits(z, code_size^) or_return
+		code, available = read_bits(z, pulled, code_size^) or_return
 		if !available || code != SHRINK_CONTROL_CODE {
 			return
 		}
 
 		command: int
-		command, available = read_bits(z, code_size^) or_return
+		command, available = read_bits(z, pulled, code_size^) or_return
 		if !available {
 			return 0, false, General_Error.Stream_Too_Short
 		}
@@ -179,13 +188,13 @@ unshrink_read_code :: proc(z: ^compress.Context, s: ^Unshrink, code_size: ^uint,
 }
 
 @(private)
-unshrink_read_code_bits :: #force_inline proc(z: ^compress.Context, b: ^Bits, s: ^Unshrink, code_size: ^uint, next_free: ^int) -> (code: int, available: bool, err: Error) {
-	code, available = bits_read(z, b, code_size^) or_return
+unshrink_read_code_bits :: #force_inline proc(z: ^compress.Context, pulled: ^i64, b: ^Bits, s: ^Unshrink, code_size: ^uint, next_free: ^int) -> (code: int, available: bool, err: Error) {
+	code, available = bits_read(z, pulled, b, code_size^) or_return
 	if available && code == SHRINK_CONTROL_CODE {
 		z.code_buffer = b.buffer
 		z.num_bits    = b.count
 		size, free := code_size^, next_free^
-		code, available, size, free, err = unshrink_control(z, s, size, free)
+		code, available, size, free, err = unshrink_control(z, pulled, s, size, free)
 		code_size^ = size
 		next_free^ = free
 		b.buffer = z.code_buffer
@@ -195,12 +204,12 @@ unshrink_read_code_bits :: #force_inline proc(z: ^compress.Context, b: ^Bits, s:
 }
 
 @(private)
-unshrink_control :: proc(z: ^compress.Context, s: ^Unshrink, code_size: uint, next_free: int) -> (code: int, available: bool, size: uint, free: int, err: Error) {
+unshrink_control :: proc(z: ^compress.Context, pulled: ^i64, s: ^Unshrink, code_size: uint, next_free: int) -> (code: int, available: bool, size: uint, free: int, err: Error) {
 	size, free = code_size, next_free
 	code = SHRINK_CONTROL_CODE
 	for code == SHRINK_CONTROL_CODE {
 		command: int
-		command, available = read_bits(z, size) or_return
+		command, available = read_bits(z, pulled, size) or_return
 		if !available {
 			return 0, false, size, free, General_Error.Stream_Too_Short
 		}
@@ -216,7 +225,7 @@ unshrink_control :: proc(z: ^compress.Context, s: ^Unshrink, code_size: uint, ne
 		case:
 			return 0, false, size, free, PKZIP_Legacy_Error.Invalid_Control_Code
 		}
-		code, available = read_bits(z, size) or_return
+		code, available = read_bits(z, pulled, size) or_return
 		if !available {
 			return
 		}

@@ -186,9 +186,9 @@ Deflate_Match :: struct {
 	length:   i32,
 }
 
-Deflate_Format :: enum u8 {Raw, Zlib, Gzip, Raw64}
+Format :: enum u8 {Raw, Zlib, Gzip, Raw64}
 
-Deflate_Writer :: struct {
+Writer :: struct {
 	w:           io.Writer,
 	state:       ^Deflate,
 	state64:     ^Deflate64,
@@ -203,7 +203,7 @@ Deflate_Writer :: struct {
 	allocator:   runtime.Allocator,
 	options:     compress.Options,
 	level:       Deflate_Level,
-	format:      Deflate_Format,
+	format:      Format,
 	finished:    bool,
 	owns_window: bool,
 }
@@ -271,9 +271,7 @@ Inflate_Decoder :: struct {
 	fixed_loaded: bool,
 }
 
-Inflate_Format :: enum u8 {Raw, Zlib, Gzip, Raw64}
-
-Inflate_Reader :: struct {
+Reader :: struct {
 	decoder:     Inflate_Decoder,
 	z:           ^compress.Context,
 	window:      []u8,
@@ -289,7 +287,7 @@ Inflate_Reader :: struct {
 	err:         Error,
 	allocator:   runtime.Allocator,
 	digest:      u32,
-	format:      Inflate_Format,
+	format:      Format,
 	done:        bool,
 	owns_window: bool,
 }
@@ -1030,7 +1028,7 @@ inflate_zlib_header :: proc(z: ^compress.Context) -> (err: Error) {
 }
 
 @(private)
-inflate_stream_init :: proc(r: ^Inflate_Reader, z: ^compress.Context, format: Inflate_Format, expected_output_size: int, options: compress.Options, allocator: runtime.Allocator) -> (err: Error) {
+inflate_stream_init :: proc(r: ^Reader, z: ^compress.Context, format: Format, expected_output_size: int, options: compress.Options, allocator: runtime.Allocator) -> (err: Error) {
 	r^ = {}
 	r.z         = z
 	r.format    = format
@@ -1050,7 +1048,7 @@ inflate_stream_init :: proc(r: ^Inflate_Reader, z: ^compress.Context, format: In
 	r.declared = expected
 	if expected >= 0 {
 		if r.limit >= 0 && expected > r.limit {
-			return General_Error.Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX if format == .Gzip else General_Error.Output_Too_Short
+			return General_Error.Output_Too_Short
 		}
 		r.limit = expected
 	}
@@ -1104,7 +1102,7 @@ inflate_stream_init :: proc(r: ^Inflate_Reader, z: ^compress.Context, format: In
 }
 
 @(private)
-inflate_stream_fill :: proc(r: ^Inflate_Reader) -> (err: Error) {
+inflate_stream_fill :: proc(r: ^Reader) -> (err: Error) {
 	if r.decoder.state == .Done {
 		_, header_size := inflate_gzip_header(r.z) or_return
 		r.progress.bytes_in += i64(header_size)
@@ -1198,9 +1196,9 @@ inflate_stream_fill :: proc(r: ^Inflate_Reader) -> (err: Error) {
 }
 
 @(private)
-inflate_stream_to_writer :: proc(w: io.Writer, z: ^compress.Context, format: Inflate_Format, expected_output_size: int, options: compress.Options, allocator: runtime.Allocator) -> (err: Error) {
-	r: Inflate_Reader
-	defer inflate_reader_destroy(&r)
+inflate_stream_to_writer :: proc(w: io.Writer, z: ^compress.Context, format: Format, expected_output_size: int, options: compress.Options, allocator: runtime.Allocator) -> (err: Error) {
+	r: Reader
+	defer reader_destroy(&r)
 	inflate_stream_init(&r, z, format, expected_output_size, options, allocator) or_return
 	for !r.done {
 		fill_err := inflate_stream_fill(&r)
@@ -1267,7 +1265,7 @@ inflate_progress_block :: #force_no_inline proc(d: ^Inflate_Decoder, consumed: i
 }
 
 @(private)
-inflate_reader_progress :: proc(r: ^Inflate_Reader) -> (err: Error) {
+inflate_reader_progress :: proc(r: ^Reader) -> (err: Error) {
 	bytes_in := r.progress.bytes_in
 	if r.decoder.state != .Done {
 		bytes_in += inflate_consumed(&r.decoder.s)

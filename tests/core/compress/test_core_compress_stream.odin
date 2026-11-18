@@ -225,9 +225,9 @@ compress_context_zlib_stored :: proc(t: ^testing.T) {
 		ctx := stream_test_context(kind, &input, &br, &tr, &output)
 		defer compress.destroy_context(&ctx)
 
-		err := deflate.inflate_zlib(&ctx)
-		testing.expectf(t, err == nil, "%v: inflate_zlib returned %v", kind, err)
-		testing.expectf(t, bytes.equal(output[:], data), "%v: inflate_zlib output differs", kind)
+		err := deflate.decompress_zlib(&ctx)
+		testing.expectf(t, err == nil, "%v: decompress_zlib returned %v", kind, err)
+		testing.expectf(t, bytes.equal(output[:], data), "%v: decompress_zlib output differs", kind)
 	}
 }
 
@@ -359,9 +359,9 @@ compress_context_zlib_fixed :: proc(t: ^testing.T) {
 			ctx := stream_test_context(kind, &input, &br, &tr, &output)
 			defer compress.destroy_context(&ctx)
 
-			err := deflate.inflate_zlib(&ctx)
-			testing.expectf(t, err == nil, "%v, tail %q: inflate_zlib returned %v", kind, tail, err)
-			testing.expectf(t, bytes.equal(output[:], want), "%v, tail %q: inflate_zlib output differs", kind, tail)
+			err := deflate.decompress_zlib(&ctx)
+			testing.expectf(t, err == nil, "%v, tail %q: decompress_zlib returned %v", kind, tail, err)
+			testing.expectf(t, bytes.equal(output[:], want), "%v, tail %q: decompress_zlib output differs", kind, tail)
 
 			rest: [5]byte
 			rest_err := compress.read_slice(&ctx, rest[:])

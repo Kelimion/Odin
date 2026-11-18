@@ -46,7 +46,7 @@ inflate_sinks_round_trip :: proc(t: ^testing.T) {
 	data := stream_match_data()
 	defer delete(data)
 
-	for format in deflate.Inflate_Format {
+	for format in deflate.Format {
 		for level in ([]deflate.Deflate_Level{.Stored, .Level_1, .Level_6}) {
 			packed: [dynamic]byte
 			defer delete(packed)
@@ -68,7 +68,7 @@ inflate_reader_random_reads :: proc(t: ^testing.T) {
 	data := stream_match_data()
 	defer delete(data)
 
-	for format in deflate.Inflate_Format {
+	for format in deflate.Format {
 		packed: [dynamic]byte
 		defer delete(packed)
 		testing.expect_value(t, sinks_pack(format, data, &packed, .Level_6), nil)
@@ -81,10 +81,10 @@ inflate_reader_random_reads :: proc(t: ^testing.T) {
 			ctx := stream_test_context(kind, &input, &br, &tr)
 			defer compress.destroy_context(&ctx)
 
-			r := new(deflate.Inflate_Reader)
+			r := new(deflate.Reader)
 			defer free(r)
-			defer deflate.inflate_reader_destroy(r)
-			testing.expect_value(t, deflate.inflate_reader_init(r, &ctx, format, options = {chunk_size = 1 + rand.int_max(100_000)}), nil)
+			defer deflate.reader_destroy(r)
+			testing.expect_value(t, deflate.reader_init(r, &ctx, format, options = {chunk_size = 1 + rand.int_max(100_000)}), nil)
 
 			output: [dynamic]byte
 			defer delete(output)
@@ -97,16 +97,16 @@ inflate_reader_random_reads :: proc(t: ^testing.T) {
 					size = 1 + rand.int_max(16)
 				}
 				n: int
-				n, err = deflate.inflate_reader_read(r, buffer[:size])
+				n, err = deflate.reader_read(r, buffer[:size])
 				testing.expectf(t, n > 0 || err != nil, "%v, %v: empty read without an error", format, kind)
 				append(&output, ..buffer[:n])
 			}
 			testing.expectf(t, err == io.Error.EOF, "%v, %v: %v", format, kind, err)
 			testing.expectf(t, bytes.equal(output[:], data), "%v, %v: output differs, %v vs %v bytes", format, kind, len(output), len(data))
 
-			n, again := deflate.inflate_reader_read(r, buffer[:])
+			n, again := deflate.reader_read(r, buffer[:])
 			testing.expectf(t, n == 0 && again == io.Error.EOF, "%v, %v: read after EOF gave %v, %v", format, kind, n, again)
-			n, again = deflate.inflate_reader_read(r, nil)
+			n, again = deflate.reader_read(r, nil)
 			testing.expectf(t, n == 0 && again == nil, "%v, %v: empty read after EOF gave %v, %v", format, kind, n, again)
 		}
 	}
@@ -118,13 +118,13 @@ inflate_reader_as_stream :: proc(t: ^testing.T) {
 	defer delete(data)
 	packed: [dynamic]byte
 	defer delete(packed)
-	testing.expect_value(t, deflate.deflate_gzip(&packed, data), nil)
+	testing.expect_value(t, deflate.compress_gzip(&packed, data), nil)
 
 	input := packed[:]
 	ctx := compress.init_context(&input)
-	r: deflate.Inflate_Reader
-	testing.expect_value(t, deflate.inflate_reader_init(&r, &ctx, .Gzip), nil)
-	stream := deflate.inflate_reader_to_stream(&r)
+	r: deflate.Reader
+	testing.expect_value(t, deflate.reader_init(&r, &ctx, .Gzip), nil)
+	stream := deflate.reader_to_stream(&r)
 	defer io.destroy(stream)
 
 	testing.expect_value(t, io.query(stream), io.Stream_Mode_Set{.Read, .Destroy, .Query})
@@ -142,13 +142,13 @@ inflate_reader_as_stream :: proc(t: ^testing.T) {
 	packed[len(packed) - 8] ~= 0x55
 	input = packed[:]
 	bad := compress.init_context(&input)
-	broken: deflate.Inflate_Reader
-	defer deflate.inflate_reader_destroy(&broken)
-	testing.expect_value(t, deflate.inflate_reader_init(&broken, &bad, .Gzip), nil)
-	n, err = io.read_full(deflate.inflate_reader_to_stream(&broken), output)
+	broken: deflate.Reader
+	defer deflate.reader_destroy(&broken)
+	testing.expect_value(t, deflate.reader_init(&broken, &bad, .Gzip), nil)
+	n, err = io.read_full(deflate.reader_to_stream(&broken), output)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, n, len(data))
-	n, err = io.read(deflate.inflate_reader_to_stream(&broken), extra[:])
+	n, err = io.read(deflate.reader_to_stream(&broken), extra[:])
 	testing.expect_value(t, n, 0)
 	testing.expect_value(t, err, io.Error.Unknown)
 	testing.expect_value(t, broken.err, compress.Error(compress.GZIP_Error.Payload_CRC_Invalid))
@@ -160,7 +160,7 @@ inflate_truncated_prefix :: proc(t: ^testing.T) {
 	defer delete(data)
 
 	cuts := 8 if SLIM_TESTS else 48
-	for format in deflate.Inflate_Format {
+	for format in deflate.Format {
 		slack := 2 + (65_538 if format == .Raw64 else 258)
 		for level in ([]deflate.Deflate_Level{.Stored, .Level_1, .Level_6}) {
 			packed: [dynamic]byte
@@ -202,7 +202,7 @@ inflate_sinks_options :: proc(t: ^testing.T) {
 	defer delete(data)
 	packed: [dynamic]byte
 	defer delete(packed)
-	testing.expect_value(t, deflate.deflate_raw(&packed, data), nil)
+	testing.expect_value(t, deflate.compress_raw(&packed, data), nil)
 
 	{
 		buffer := make([]byte, 40_000)
@@ -215,16 +215,16 @@ inflate_sinks_options :: proc(t: ^testing.T) {
 		output: [dynamic]byte
 		defer delete(output)
 		aw := Append_Writer{out = &output, fail_at = -1}
-		err := deflate.inflate_raw_to_writer(append_writer(&aw), &ctx, options = {buffer = buffer[:32 * 1024 + 306]})
+		err := deflate.decompress_raw_to_writer(append_writer(&aw), &ctx, options = {buffer = buffer[:32 * 1024 + 306]})
 		testing.expect_value(t, err, compress.General_Error.Incompatible_Options)
 		testing.expect_value(t, len(output), 0)
 
-		r: deflate.Inflate_Reader
+		r: deflate.Reader
 		input = packed[:]
 		ctx = compress.init_context(&input)
-		testing.expect_value(t, deflate.inflate_reader_init(&r, &ctx, .Raw, len(data), {buffer = buffer}), nil)
+		testing.expect_value(t, deflate.reader_init(&r, &ctx, .Raw, len(data), {buffer = buffer}), nil)
 		testing.expect_value(t, raw_data(r.window), raw_data(buffer))
-		deflate.inflate_reader_destroy(&r)
+		deflate.reader_destroy(&r)
 		testing.expect_value(t, len(buffer), 40_000)
 	}
 
@@ -234,32 +234,32 @@ inflate_sinks_options :: proc(t: ^testing.T) {
 		output: [dynamic]byte
 		defer delete(output)
 		aw := Append_Writer{out = &output, fail_at = -1}
-		err := deflate.inflate_raw_to_writer(append_writer(&aw), &ctx, options = {max_memory = memory})
+		err := deflate.decompress_raw_to_writer(append_writer(&aw), &ctx, options = {max_memory = memory})
 		if memory == 32 * 1024 + 306 {
 			testing.expectf(t, err == compress.General_Error.Memory_Limit_Exceeded, "max_memory %v: %v", memory, err)
 		} else {
 			testing.expectf(t, err == nil && bytes.equal(output[:], data), "max_memory %v: %v, %v bytes", memory, err, len(output))
 		}
 
-		r: deflate.Inflate_Reader
+		r: deflate.Reader
 		input = packed[:]
 		ctx = compress.init_context(&input)
-		if deflate.inflate_reader_init(&r, &ctx, .Raw, options = {max_memory = memory}) == nil {
+		if deflate.reader_init(&r, &ctx, .Raw, options = {max_memory = memory}) == nil {
 			testing.expectf(t, len(r.window) <= memory, "max_memory %v: window of %v bytes", memory, len(r.window))
 		}
-		deflate.inflate_reader_destroy(&r)
+		deflate.reader_destroy(&r)
 	}
 
 	for expected in ([]int{1, 1000, len(data) - 1, len(data), len(data) + 1}) {
 		for kind in Stream_Kind {
 			sinks_check(t, "expected size", .Raw, kind, packed[:], expected)
 		}
-		r: deflate.Inflate_Reader
+		r: deflate.Reader
 		input := packed[:]
 		ctx := compress.init_context(&input)
-		testing.expect_value(t, deflate.inflate_reader_init(&r, &ctx, .Raw, expected), nil)
+		testing.expect_value(t, deflate.reader_init(&r, &ctx, .Raw, expected), nil)
 		testing.expectf(t, len(r.window) <= max(expected, 300_000), "expected %v: window of %v bytes", expected, len(r.window))
-		deflate.inflate_reader_destroy(&r)
+		deflate.reader_destroy(&r)
 	}
 
 	for limit in ([]int{-1, 1, 70_000, len(data) - 1, len(data)}) {
@@ -275,9 +275,9 @@ inflate_sinks_options :: proc(t: ^testing.T) {
 		output: [dynamic]byte
 		defer delete(output)
 		aw := Append_Writer{out = &output, fail_at = 1}
-		err := deflate.inflate_raw_to_writer(append_writer(&aw), &ctx, options = {max_memory = -1})
+		err := deflate.decompress_raw_to_writer(append_writer(&aw), &ctx, options = {max_memory = -1})
 		testing.expect_value(t, err, compress.General_Error.Incompatible_Options)
-		err = deflate.inflate_raw_to_writer(append_writer(&aw), &ctx, options = {chunk_size = -1})
+		err = deflate.decompress_raw_to_writer(append_writer(&aw), &ctx, options = {chunk_size = -1})
 		testing.expect_value(t, err, compress.General_Error.Incompatible_Options)
 	}
 }
@@ -288,7 +288,7 @@ inflate_writer_errors :: proc(t: ^testing.T) {
 	defer delete(data)
 	packed: [dynamic]byte
 	defer delete(packed)
-	testing.expect_value(t, deflate.deflate_zlib(&packed, data), nil)
+	testing.expect_value(t, deflate.compress_zlib(&packed, data), nil)
 
 	for fail_at in ([]int{0, 1, 100_000, len(data) - 1}) {
 		input := packed[:]
@@ -296,7 +296,7 @@ inflate_writer_errors :: proc(t: ^testing.T) {
 		output: [dynamic]byte
 		defer delete(output)
 		aw := Append_Writer{out = &output, fail_at = fail_at}
-		err := deflate.inflate_zlib_to_writer(append_writer(&aw), &ctx, options = {chunk_size = 4096})
+		err := deflate.decompress_zlib_to_writer(append_writer(&aw), &ctx, options = {chunk_size = 4096})
 		testing.expectf(t, err == io.Error.Short_Write, "fail at %v: %v", fail_at, err)
 		testing.expectf(t, bytes.equal(output[:], data[:fail_at]), "fail at %v: %v bytes written", fail_at, len(output))
 	}
@@ -304,7 +304,7 @@ inflate_writer_errors :: proc(t: ^testing.T) {
 
 @(test)
 inflate_sinks_empty_and_tiny :: proc(t: ^testing.T) {
-	for format in deflate.Inflate_Format {
+	for format in deflate.Format {
 		for size in ([]int{0, 1, 2, 257, 32 * 1024, 32 * 1024 + 1, 64 * 1024 + 7}) {
 			data := make([]byte, size)
 			defer delete(data)
@@ -333,7 +333,7 @@ inflate_sinks_fuzz :: proc(t: ^testing.T) {
 		data: [dynamic]byte
 		defer delete(data)
 		d64_test_data(rand.int_max(4), rand.int_max(150_000), &data)
-		format := deflate.Inflate_Format(rand.int_max(len(deflate.Inflate_Format)))
+		format := deflate.Format(rand.int_max(len(deflate.Format)))
 		level  := deflate.Deflate_Level(rand.int_max(11))
 		packed: [dynamic]byte
 		defer delete(packed)
@@ -365,17 +365,17 @@ inflate_sinks_fuzz :: proc(t: ^testing.T) {
 	}
 }
 
-sinks_pack :: proc(format: deflate.Inflate_Format, input: []byte, output: ^[dynamic]byte, level: deflate.Deflate_Level) -> compress.Error {
+sinks_pack :: proc(format: deflate.Format, input: []byte, output: ^[dynamic]byte, level: deflate.Deflate_Level) -> compress.Error {
 	switch format {
-	case .Raw:   return deflate.deflate_raw(output, input, level)
-	case .Zlib:  return deflate.deflate_zlib(output, input, level)
-	case .Gzip:  return deflate.deflate_gzip(output, input, level)
-	case .Raw64: return deflate.deflate64_raw(output, input, level)
+	case .Raw:   return deflate.compress_raw(output, input, level)
+	case .Zlib:  return deflate.compress_zlib(output, input, level)
+	case .Gzip:  return deflate.compress_gzip(output, input, level)
+	case .Raw64: return deflate.compress_raw64(output, input, level)
 	}
 	return nil
 }
 
-sinks_format :: proc(format: Deflate_Format) -> deflate.Inflate_Format {
+sinks_format :: proc(format: Deflate_Format) -> deflate.Format {
 	switch format {
 	case .Raw:  return .Raw
 	case .ZLIB: return .Zlib
@@ -393,17 +393,17 @@ sinks_chunk :: proc(output_size: int) -> int {
 	return max(1 + rand.int_max(64 * 1024), floor)
 }
 
-sinks_memory_unpack :: proc(format: deflate.Inflate_Format, kind: Stream_Kind, input: []byte, output: ^[dynamic]byte, expected: int, options: compress.Options, rest: ^[5]byte) -> (err: compress.Error, rest_err: io.Error) {
+sinks_memory_unpack :: proc(format: deflate.Format, kind: Stream_Kind, input: []byte, output: ^[dynamic]byte, expected: int, options: compress.Options, rest: ^[5]byte) -> (err: compress.Error, rest_err: io.Error) {
 	input := input
 	br: bytes.Reader
 	tr: Trickle_Reader
 	ctx := stream_test_context(kind, &input, &br, &tr, output)
 	defer compress.destroy_context(&ctx)
 	switch format {
-	case .Raw:   err = deflate.inflate_raw(&ctx, expected, options)
-	case .Zlib:  err = deflate.inflate_zlib(&ctx, expected, options)
-	case .Gzip:  err = deflate.inflate_gzip(&ctx, expected, options)
-	case .Raw64: err = deflate.inflate64_raw(&ctx, expected, options)
+	case .Raw:   err = deflate.decompress_raw(&ctx, expected, options)
+	case .Zlib:  err = deflate.decompress_zlib(&ctx, expected, options)
+	case .Gzip:  err = deflate.decompress_gzip(&ctx, expected, options)
+	case .Raw64: err = deflate.decompress_raw64(&ctx, expected, options)
 	}
 	if err == nil {
 		rest_err = compress.read_slice(&ctx, rest[:])
@@ -411,7 +411,7 @@ sinks_memory_unpack :: proc(format: deflate.Inflate_Format, kind: Stream_Kind, i
 	return
 }
 
-sinks_unpack :: proc(sink: Sink, format: deflate.Inflate_Format, kind: Stream_Kind, input: []byte, output: ^[dynamic]byte, expected: int, options: compress.Options, rest: ^[5]byte) -> (err: compress.Error, rest_err: io.Error, bytes_written: i64) {
+sinks_unpack :: proc(sink: Sink, format: deflate.Format, kind: Stream_Kind, input: []byte, output: ^[dynamic]byte, expected: int, options: compress.Options, rest: ^[5]byte) -> (err: compress.Error, rest_err: io.Error, bytes_written: i64) {
 	input := input
 	br: bytes.Reader
 	tr: Trickle_Reader
@@ -423,25 +423,25 @@ sinks_unpack :: proc(sink: Sink, format: deflate.Inflate_Format, kind: Stream_Ki
 		aw := Append_Writer{out = output, fail_at = -1}
 		w  := append_writer(&aw)
 		switch format {
-		case .Raw:   err = deflate.inflate_raw_to_writer(w, &ctx, expected, options)
-		case .Zlib:  err = deflate.inflate_zlib_to_writer(w, &ctx, expected, options)
-		case .Gzip:  err = deflate.inflate_gzip_to_writer(w, &ctx, expected, options)
-		case .Raw64: err = deflate.inflate64_raw_to_writer(w, &ctx, expected, options)
+		case .Raw:   err = deflate.decompress_raw_to_writer(w, &ctx, expected, options)
+		case .Zlib:  err = deflate.decompress_zlib_to_writer(w, &ctx, expected, options)
+		case .Gzip:  err = deflate.decompress_gzip_to_writer(w, &ctx, expected, options)
+		case .Raw64: err = deflate.decompress_raw64_to_writer(w, &ctx, expected, options)
 		}
 
 	case .Reader, .Reader_Stream:
-		r := new(deflate.Inflate_Reader)
+		r := new(deflate.Reader)
 		defer free(r)
-		defer deflate.inflate_reader_destroy(r)
+		defer deflate.reader_destroy(r)
 		buffer := make([]byte, 70_000)
 		defer delete(buffer)
-		err = deflate.inflate_reader_init(r, &ctx, format, expected, options)
-		stream := deflate.inflate_reader_to_stream(r)
+		err = deflate.reader_init(r, &ctx, format, expected, options)
+		stream := deflate.reader_to_stream(r)
 		for err == nil {
 			size := 1 + rand.int_max(16 if rand.int_max(2) == 0 else len(buffer))
 			n: int
 			if sink == .Reader {
-				n, err = deflate.inflate_reader_read(r, buffer[:size])
+				n, err = deflate.reader_read(r, buffer[:size])
 			} else {
 				io_err: io.Error
 				n, io_err = io.read(stream, buffer[:size])
@@ -460,7 +460,7 @@ sinks_unpack :: proc(sink: Sink, format: deflate.Inflate_Format, kind: Stream_Ki
 	return
 }
 
-sinks_check :: proc(t: ^testing.T, label: string, format: deflate.Inflate_Format, kind: Stream_Kind, input: []byte, expected := -1, options := compress.Options{}) -> (memory_err: compress.Error) {
+sinks_check :: proc(t: ^testing.T, label: string, format: deflate.Format, kind: Stream_Kind, input: []byte, expected := -1, options := compress.Options{}) -> (memory_err: compress.Error) {
 	want: [dynamic]byte
 	defer delete(want)
 	want_rest: [5]byte

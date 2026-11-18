@@ -116,9 +116,7 @@ _reader_begin :: proc(r: ^Reader, z: ^compress.Context, method: Reader_Method, f
 	r.allocator = allocator
 	r.total_in  = -1
 	r.base      = i64(len(z.window)) + i64(z.num_bits / 8)
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
-		return General_Error.Incompatible_Options
-	}
+	check_options(options) or_return
 	if method == .Reduce && (factor < 1 || factor > 4) {
 		return General_Error.Incompatible_Options
 	}
@@ -269,7 +267,7 @@ _unshrink_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 	s := r.shrink
 	if !r.started {
 		r.started = true
-		first, available := unshrink_read_code(z, s, &r.code_size, &r.next_free) or_return
+		first, available := unshrink_read_code(z, &r.pulled, s, &r.code_size, &r.next_free) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
@@ -301,7 +299,7 @@ _unshrink_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		r.first_byte = first_byte
 	}
 	for ready < stop {
-		code, available := unshrink_read_code(z, s, &code_size, &next_free) or_return
+		code, available := unshrink_read_code(z, &r.pulled, s, &code_size, &next_free) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
@@ -356,7 +354,7 @@ _expand_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 	e := r.expand
 	if !r.started {
 		r.started = true
-		expand_read_followers(z, e) or_return
+		expand_read_followers(z, &r.pulled, e) or_return
 	}
 
 	window        := r.window
@@ -381,7 +379,7 @@ _expand_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		r.length    = length
 	}
 	for ready < stop {
-		symbol, available := expand_symbol(z, e, last) or_return
+		symbol, available := expand_symbol(z, &r.pulled, e, last) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
@@ -429,10 +427,10 @@ _explode_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 	if !r.started {
 		r.started = true
 		if r.literal_tree {
-			explode_read_tree(z, &t[0], IMPLODE_LITERAL_SYMBOLS) or_return
+			explode_read_tree(z, &r.pulled, &t[0], IMPLODE_LITERAL_SYMBOLS) or_return
 		}
-		explode_read_tree(z, &t[1], IMPLODE_LENGTH_SYMBOLS)   or_return
-		explode_read_tree(z, &t[2], IMPLODE_DISTANCE_SYMBOLS) or_return
+		explode_read_tree(z, &r.pulled, &t[1], IMPLODE_LENGTH_SYMBOLS)   or_return
+		explode_read_tree(z, &r.pulled, &t[2], IMPLODE_DISTANCE_SYMBOLS) or_return
 	}
 
 	window        := r.window
@@ -449,7 +447,7 @@ _explode_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		r.ready     = ready
 	}
 	for ready < stop {
-		flag, available := read_bits(z, 1) or_return
+		flag, available := read_bits(z, &r.pulled, 1) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
@@ -457,9 +455,9 @@ _explode_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		if flag == 1 {
 			symbol: int
 			if literal_tree {
-				symbol, available = explode_decode(z, &t[0]) or_return
+				symbol, available = explode_decode(z, &r.pulled, &t[0]) or_return
 			} else {
-				symbol, available = read_bits(z, 8) or_return
+				symbol, available = read_bits(z, &r.pulled, 8) or_return
 			}
 			if !available {
 				return General_Error.Stream_Too_Short
@@ -470,20 +468,20 @@ _explode_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		}
 
 		low, high, length, extra: int
-		low, available = read_bits(z, distance_bits) or_return
+		low, available = read_bits(z, &r.pulled, distance_bits) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
-		high, available = explode_decode(z, &t[2]) or_return
+		high, available = explode_decode(z, &r.pulled, &t[2]) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
-		length, available = explode_decode(z, &t[1]) or_return
+		length, available = explode_decode(z, &r.pulled, &t[1]) or_return
 		if !available {
 			return General_Error.Stream_Too_Short
 		}
 		if length == IMPLODE_EXTRA_LENGTH {
-			extra, available = read_bits(z, 8) or_return
+			extra, available = read_bits(z, &r.pulled, 8) or_return
 			if !available {
 				return General_Error.Stream_Too_Short
 			}
@@ -525,11 +523,9 @@ _source_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offse
 		if len(r.z.window) > 0 {
 			k := copy(p, r.z.window)
 			r.z.window = r.z.window[k:]
-			r.pulled  += i64(k)
 			return i64(k), nil
 		}
 		k, read_err := io.read(r.z.input, p)
-		r.pulled += i64(k)
 		return i64(k), read_err
 	case .Query:
 		return io.query_utility({.Read, .Query})

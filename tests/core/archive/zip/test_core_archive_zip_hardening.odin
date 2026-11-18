@@ -356,7 +356,7 @@ test_declared_size_binding :: proc(t: ^testing.T) {
 bomb_kernel :: proc(t: ^testing.T) -> (plain, packed: [dynamic]u8) {
 	resize(&plain, KERNEL_SIZE)
 	mem.set(raw_data(plain), 'a', KERNEL_SIZE)
-	testing.expect_value(t, deflate.deflate_raw_to_dynamic(&packed, plain[:]), nil)
+	testing.expect_value(t, deflate.compress_raw_to_dynamic(&packed, plain[:]), nil)
 	return
 }
 
@@ -387,7 +387,7 @@ quoted_overlap_bomb :: proc(t: ^testing.T, n: int, zip64: bool) -> (data: [dynam
 	}
 
 	out: [dynamic]u8
-	inflate_err := deflate.inflate_raw_from_bytes(&out, packed[:])
+	inflate_err := deflate.decompress_raw_from_bytes(&out, packed[:])
 	verified = inflate_err == nil && len(out) == members[0].size && hash.crc32(out[:]) == members[0].crc
 	delete(out)
 
@@ -771,7 +771,7 @@ crafted_add :: proc(c: ^Crafted, name: string, method: zip.Method, plain: string
 	packed: [dynamic]u8
 	defer delete(packed)
 	if method == .Deflate {
-		deflate.deflate_raw_to_dynamic(&packed, input)
+		deflate.compress_raw_to_dynamic(&packed, input)
 	} else if method == .BZip2 {
 		bzip2.compress_to_dynamic(&packed, input)
 	} else {

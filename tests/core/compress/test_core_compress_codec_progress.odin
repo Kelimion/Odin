@@ -280,7 +280,7 @@ lz4_progress_block :: proc(t: ^testing.T) {
 		testing.expect_value(t, lz4.decompress_block(&output, packed[:n], len(text), ppmd_progress_options(&log, {progress_interval = INTERVAL})), nil)
 		testing.expect(t, bytes.equal(output[:], text))
 		testing.expectf(t, len(log.calls) >= 4, "lz4 block decode: %v calls", len(log.calls))
-		ppmd_progress_expect(t, "lz4 block decode", log.calls[:], i64(n), -1, i64(n), i64(len(text)))
+		ppmd_progress_expect(t, "lz4 block decode", log.calls[:], i64(n), i64(len(text)), i64(n), i64(len(text)))
 		codec_progress_expect_spacing(t, "lz4 block decode", log.calls[:], INTERVAL, false)
 		first: [dynamic]compress.Progress
 		defer delete(first)

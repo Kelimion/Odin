@@ -38,11 +38,11 @@ compress_block_bound :: proc(length: int) -> int {
 	return length + length / 255 + 16
 }
 
-compress_frame_bound :: proc(length: int, options := Frame_Options{flags = DEFAULT_FRAME_FLAGS}) -> int {
+compress_frame_bound :: proc(length: int, frame_options := Frame_Options{flags = DEFAULT_FRAME_FLAGS}) -> int {
 	if length < 0 || length > LZ4_INPUT_MAX {
 		return -1
 	}
-	block_max := LZ4_BLOCK_MAX_BYTES[options.block_max_size]
+	block_max := LZ4_BLOCK_MAX_BYTES[frame_options.block_max_size]
 	blocks    := (length + block_max - 1) / block_max
 	return FRAME_HEADER_MAX + FRAME_FOOTER_MAX + 4 + blocks * 8 + length + block_max / 255 + 16
 }
@@ -132,7 +132,7 @@ compress_frame_to_dynamic :: proc(output: ^[dynamic]u8, input: []u8, level := Le
 	return lz4_to_dynamic(output, input, compress_frame_bound(len(input), frame_options), level, frame_options, options, dictionary, true)
 }
 
-frame_writer_init :: proc(fw: ^Frame_Writer, w: io.Writer, level := Level.Default, frame_options := Frame_Options{flags = DEFAULT_FRAME_FLAGS}, content_size: i64 = -1, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
+frame_writer_init :: proc(fw: ^Frame_Writer, w: io.Writer, level := Level.Default, frame_options := Frame_Options{flags = DEFAULT_FRAME_FLAGS}, input_size: i64 = -1, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
 	fw^ = {}
 	fw.level         = level
 	fw.frame_options = frame_options
@@ -142,7 +142,7 @@ frame_writer_init :: proc(fw: ^Frame_Writer, w: io.Writer, level := Level.Defaul
 	fw.block_max     = LZ4_BLOCK_MAX_BYTES[frame_options.block_max_size]
 	defer fw.err = err
 
-	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 || content_size < -1 {
+	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 || input_size < -1 {
 		return General_Error.Incompatible_Options
 	}
 
@@ -166,16 +166,16 @@ frame_writer_init :: proc(fw: ^Frame_Writer, w: io.Writer, level := Level.Defaul
 		fw.window      = non_zero_make([]u8, size, allocator) or_return
 		fw.owns_window = true
 	}
-	lz4_writer_start(fw, w, content_size)
+	lz4_writer_start(fw, w, input_size)
 	return nil
 }
 
-frame_writer_reset :: proc(fw: ^Frame_Writer, w: io.Writer, content_size: i64 = -1) -> (err: Error) {
+frame_writer_reset :: proc(fw: ^Frame_Writer, w: io.Writer, input_size: i64 = -1) -> (err: Error) {
 	defer fw.err = err
-	if fw.state == nil || fw.out == nil || fw.window == nil || content_size < -1 {
+	if fw.state == nil || fw.out == nil || fw.window == nil || input_size < -1 {
 		return General_Error.Incompatible_Options
 	}
-	lz4_writer_start(fw, w, content_size)
+	lz4_writer_start(fw, w, input_size)
 	return nil
 }
 
@@ -187,8 +187,8 @@ frame_writer_write :: proc(fw: ^Frame_Writer, p: []u8) -> (n: int, err: Error) {
 		return 0, io.Error.Closed
 	}
 	defer fw.err = err
-	if fw.content_size >= 0 && i64(len(p)) > fw.content_size - fw.total {
-		return 0, LZ4_Error.Content_Size_Mismatch
+	if fw.input_size >= 0 && i64(len(p)) > fw.input_size - fw.total {
+		return 0, General_Error.Size_Mismatch
 	}
 	for n < len(p) {
 		if fw.filled == len(fw.window) {
@@ -203,7 +203,7 @@ frame_writer_write :: proc(fw: ^Frame_Writer, p: []u8) -> (n: int, err: Error) {
 		n         += k
 		for fw.filled - fw.start >= fw.block_max + 4 {
 			lz4_writer_block(fw, fw.block_max) or_return
-			compress.report_progress(fw.options, fw.total, fw.flushed, fw.content_size, -1) or_return
+			compress.report_progress(fw.options, fw.total, fw.flushed, fw.input_size, -1) or_return
 		}
 	}
 	return
@@ -217,8 +217,8 @@ frame_writer_finish :: proc(fw: ^Frame_Writer) -> (err: Error) {
 		return nil
 	}
 	defer fw.err = err
-	if fw.content_size >= 0 && fw.total != fw.content_size {
-		return LZ4_Error.Content_Size_Mismatch
+	if fw.input_size >= 0 && fw.total != fw.input_size {
+		return General_Error.Size_Mismatch
 	}
 	for fw.start < fw.filled {
 		lz4_writer_block(fw, min(fw.block_max, fw.filled - fw.start)) or_return
@@ -232,7 +232,7 @@ frame_writer_finish :: proc(fw: ^Frame_Writer) -> (err: Error) {
 	}
 	lz4_writer_flush(fw) or_return
 	fw.finished = true
-	return compress.report_progress(fw.options, fw.total, fw.flushed, fw.content_size, -1)
+	return compress.report_progress(fw.options, fw.total, fw.flushed, fw.input_size, -1)
 }
 
 frame_writer_to_stream :: proc(fw: ^Frame_Writer) -> (s: io.Stream) {
@@ -1093,9 +1093,9 @@ lz4_encode_block :: proc(s: ^LZ4, output, data: []u8, start, end: int, level: Le
 }
 
 @(private)
-lz4_writer_start :: proc(fw: ^Frame_Writer, w: io.Writer, content_size: i64) {
+lz4_writer_start :: proc(fw: ^Frame_Writer, w: io.Writer, input_size: i64) {
 	fw.w            = w
-	fw.content_size = content_size
+	fw.input_size   = input_size
 	fw.filled       = 0
 	fw.start        = 0
 	fw.history      = 0
@@ -1104,12 +1104,12 @@ lz4_writer_start :: proc(fw: ^Frame_Writer, w: io.Writer, content_size: i64) {
 	fw.needs_index  = false
 	fw.finished     = false
 	header_options := fw.frame_options
-	if content_size < 0 {
+	if input_size < 0 {
 		header_options.flags -= {.Content_Size}
 	}
 	fw.flags = header_options.flags
 	lz4_reset(fw.state, fw.level)
-	fw.out_len = lz4_write_frame_header(fw.out, header_options, u64(max(content_size, 0)))
+	fw.out_len = lz4_write_frame_header(fw.out, header_options, u64(max(input_size, 0)))
 	if len(fw.dictionary) > 0 && .Independent_Blocks not_in fw.flags {
 		tail := fw.dictionary[max(0, len(fw.dictionary) - LZ4_MAX_OFFSET):]
 		copy(fw.window, tail)
