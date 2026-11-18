@@ -483,6 +483,48 @@ inflate_refill_entry :: #force_inline proc(s: ^Inflate, written: int, table: []u
 }
 
 @(private)
+inflate_refill_fast :: #force_inline proc(s: ^Inflate, written: int, $STREAM: bool) -> (overrun: bool) #no_bounds_check {
+	if intrinsics.expect(len(s.input) - s.position >= 8, true) {
+		s.bit_buffer |= inflate_load_u64(raw_data(s.input)[s.position:]) << u64(s.bit_count & 63)
+		s.position += int((~s.bit_count & 63) >> 3)
+		s.bit_count |= 56
+		return false
+	}
+	s.bit_count &= 63
+	return inflate_refill(s, written, STREAM)
+}
+
+@(private)
+inflate_refill_entry_fast :: #force_inline proc(s: ^Inflate, written: int, table: []u32, $BITS: u64, $STREAM: bool) -> (entry: u32, overrun: bool) #no_bounds_check {
+	if intrinsics.expect((s.bit_count & 63) >= i32(BITS), true) {
+		entry = table[s.bit_buffer & ((1 << BITS) - 1)]
+		if inflate_refill_fast(s, written, STREAM) { return entry, true }
+	} else {
+		if inflate_refill_fast(s, written, STREAM) { return 0, true }
+		entry = table[s.bit_buffer & ((1 << BITS) - 1)]
+	}
+	if intrinsics.expect(entry & INFLATE_ENTRY_SUBTABLE != 0, false) {
+		entry = inflate_sub_entry(s, table, entry, BITS)
+	}
+	return
+}
+
+@(private)
+inflate_skip_fast :: #force_inline proc(s: ^Inflate, entry: u32) #no_bounds_check {
+	s.bit_buffer >>= u64(entry & 63)
+	s.bit_count  -= i32(entry)
+}
+
+@(private)
+inflate_take_fast :: #force_inline proc(s: ^Inflate, entry: u32) -> (value: int) #no_bounds_check {
+	bits  := s.bit_buffer
+	count := u64(entry & 63)
+	s.bit_buffer >>= count
+	s.bit_count  -= i32(entry)
+	return int(entry >> 16) + int((bits & ((u64(1) << count) - 1)) >> u64((entry >> 8) & 0xf))
+}
+
+@(private)
 inflate_skip :: #force_inline proc(s: ^Inflate, entry: u32) #no_bounds_check {
 	s.bit_buffer >>= u64(entry & 63)
 	s.bit_count  -= i32(entry & 63)
@@ -626,6 +668,7 @@ inflate_decompress :: proc(d: ^Inflate_Decoder, output: []u8, grow: ^[dynamic]u8
 	distances    := &d.distances
 
 	defer {
+		s.bit_count &= 63
 		when WINDOWED {
 			d.s, d.state, d.last, d.stored, d.fixed_loaded = s, state, last, stored, fixed_loaded
 			finished := err != nil || state == .Done
@@ -829,37 +872,38 @@ inflate_decompress :: proc(d: ^Inflate_Decoder, output: []u8, grow: ^[dynamic]u8
 					fast_end := capacity - INFLATE_FAST_MARGIN
 				}
 				for written <= fast_end {
-					entry, overrun := inflate_refill_entry(&s, written, literals[:], 10, STREAM)
+					entry, overrun := inflate_refill_entry_fast(&s, written, literals[:], 10, STREAM)
 					if overrun { return written, General_Error.Stream_Too_Short }
 					length: int
 					if i32(entry) < 0 {
-						inflate_skip(&s, entry)
+						inflate_skip_fast(&s, entry)
 						output[written] = u8(entry >> 16)
 						written += 1
 						entry = inflate_entry(&s, literals[:], 10)
 						if i32(entry) < 0 {
-							inflate_skip(&s, entry)
+							inflate_skip_fast(&s, entry)
 							output[written] = u8(entry >> 16)
 							written += 1
 							entry = inflate_entry(&s, literals[:], 10)
 							if i32(entry) < 0 {
-								inflate_skip(&s, entry)
+								inflate_skip_fast(&s, entry)
 								output[written] = u8(entry >> 16)
 								written += 1
 								continue
 							}
 						}
 						inflate_skip_code(&s, entry)
-						if inflate_refill(&s, written, STREAM) { return written, General_Error.Stream_Too_Short }
+						if inflate_refill_fast(&s, written, STREAM) { return written, General_Error.Stream_Too_Short }
 						if entry & INFLATE_ENTRY_EXCEPTIONAL == 0 {
 							length = inflate_take_extra(&s, entry)
 						}
 					} else if entry & INFLATE_ENTRY_EXCEPTIONAL == 0 {
-						length = inflate_take(&s, entry)
+						length = inflate_take_fast(&s, entry)
 					} else {
-						inflate_skip(&s, entry)
+						inflate_skip_fast(&s, entry)
 					}
 					if intrinsics.expect(entry & INFLATE_ENTRY_EXCEPTIONAL != 0, false) {
+						s.bit_count &= 63
 						if entry & INFLATE_ENTRY_END != 0 {
 							if last != 0 {
 								if inflate_overrun(&s) { return written, General_Error.Stream_Too_Short }
@@ -882,7 +926,7 @@ inflate_decompress :: proc(d: ^Inflate_Decoder, output: []u8, grow: ^[dynamic]u8
 						inflate_skip(&s, distance_entry)
 						return written, Deflate_Error.Bad_Huffman_Code
 					}
-					distance := inflate_take(&s, distance_entry)
+					distance := inflate_take_fast(&s, distance_entry)
 					if intrinsics.expect(distance > written, false) { return written, Deflate_Error.Bad_Distance }
 					match_end := written + length
 					when D64 {
@@ -895,6 +939,7 @@ inflate_decompress :: proc(d: ^Inflate_Decoder, output: []u8, grow: ^[dynamic]u8
 					inflate_copy_match(raw_data(output)[written:], raw_data(output)[written - distance:], raw_data(output)[match_end:], i32(distance))
 					written = match_end
 				}
+				s.bit_count &= 63
 
 				when WINDOWED {
 					if written >= high_water { return written, nil }
