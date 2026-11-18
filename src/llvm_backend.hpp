@@ -344,6 +344,12 @@ struct lbLifetimeLocal {
 	isize        scope_index;
 };
 
+struct lbMultiAssignCopySlot {
+	Type *       type;
+	LLVMValueRef ptr;
+	bool         in_use;
+};
+
 struct lbTargetList {
 	lbTargetList *prev;
 	bool          is_block;
@@ -415,6 +421,7 @@ struct lbProcedure {
 	lbTargetList *   target_list;
 	PtrMap<Entity *, lbValue> direct_parameters;
 	bool             in_multi_assignment;
+	Array<lbMultiAssignCopySlot> multi_assign_copy_slots;
 	Array<LLVMValueRef> raw_input_parameters;
 
 	u32 global_generated_index;
@@ -797,6 +804,7 @@ lbCallingConventionKind const lb_calling_convention_map[ProcCC_MAX] = {
 	lbCallingConvention_PreserveMost,  // ProcCC_PreserveMost,
 	lbCallingConvention_PreserveAll,   // ProcCC_PreserveAll,
 
+	lbCallingConvention_X86_VectorCall, // ProcCC_VectorCall,
 };
 
 gb_internal lbCallingConventionKind lb_calling_convention_kind(ProcCallingConvention cc);

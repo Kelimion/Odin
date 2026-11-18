@@ -3196,6 +3196,9 @@ gb_internal ParameterValue handle_parameter_value(CheckerContext *ctx, Type *in_
 
 		if (in_type) {
 			check_assignment(ctx, &o, in_type, str_lit("parameter value"));
+		} else if (out_type_ != nullptr && o.mode != Addressing_Invalid &&
+		           is_type_untyped(o.type) && !is_type_untyped_nil(o.type)) {
+			convert_to_typed(ctx, &o, default_type(o.type));
 		}
 
 
@@ -4147,6 +4150,7 @@ gb_internal bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc
 	switch (cc) {
 	case ProcCC_StdCall:
 	case ProcCC_FastCall:
+	case ProcCC_VectorCall:
 		if (arch != TargetArch_i386 && arch != TargetArch_amd64) {
 			error(proc_type_node, "Invalid procedure calling convention \"%s\" for target architecture, expected either i386 or amd64, got %.*s",
 			      proc_calling_convention_strings[cc], LIT(target_arch_names[arch]));
@@ -4256,6 +4260,7 @@ gb_internal bool check_procedure_type(CheckerContext *ctx, Type *type, Ast *proc
 				break;
 			case ProcCC_Odin:
 			case ProcCC_Contextless:
+			case ProcCC_VectorCall:
 				error(e->token, "Calling convention does not support #c_vararg");
 				break;
 			}

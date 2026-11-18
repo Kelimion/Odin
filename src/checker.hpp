@@ -723,6 +723,7 @@ struct LoadFileCache {
 	BlockingMutex  mutex; // for everything below
 	String         path;
 	gbFileError    file_error;
+	bool           is_dir;
 	String         data;
 	StringMap<u64> hashes;
 };
@@ -1007,7 +1008,6 @@ struct Checker {
 
 gb_global AstPackage *builtin_pkg    = nullptr;
 gb_global AstPackage *intrinsics_pkg = nullptr;
-gb_global AstPackage *config_pkg      = nullptr;
 
 
 // CheckerInfo API

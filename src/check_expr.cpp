@@ -13274,11 +13274,6 @@ gb_internal ExprKind check_selector_call_expr(CheckerContext *c, Operand *o, Ast
 					break;
 				}
 			}
-			if (!fail && first_is_field_value) {
-				Token op = {Token_Eq};
-				AstFile *f = first_arg->file();
-				first_arg = ast_field_value(f, ast_ident(f, make_token_ident(first_arg_name)), first_arg, op);
-			}
 		}
 	}
 
@@ -14777,6 +14772,10 @@ gb_internal gbString write_expr_to_string(gbString str, Ast *node, bool shorthan
 	case_ast_node(bs, BitSetType, node);
 		str = gb_string_appendc(str, "bit_set[");
 		str = write_expr_to_string(str, bs->elem, shorthand);
+		if (bs->underlying) {
+			str = gb_string_appendc(str, "; ");
+			str = write_expr_to_string(str, bs->underlying, shorthand);
+		}
 		str = gb_string_appendc(str, "]");
 	case_end;
 
