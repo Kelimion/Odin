@@ -486,81 +486,113 @@ lz4_decode :: proc(output: []u8, op_start, history_start: int, input: []u8, dict
 	op       := op_start
 
 	for {
-		when PROGRESS {
-			if op >= progress.mark && lz4_progress_report(progress, op, i64(ip), i64(op - op_start)) {
-				return op, progress.err
-			}
-		}
-		if ip >= in_len {
-			return op, General_Error.Stream_Too_Short
-		}
-		token    := int(src[ip])
-		ip       += 1
-		literals := token >> 4
-		offset: int
-
-		if literals < 15 && in_len - ip >= 32 && out_len - op >= 64 {
-			lz4_copy_16(dst[op:], src[ip:])
-			op += literals
-			ip += literals
-			offset = int(lz4_load_u16(src[ip:]))
-			ip += 2
-			if token & 15 < 15 && offset >= 8 && offset <= op - history_start {
-				m := op - offset
+		token, offset: int
+		pending := false
+		when ODIN_ARCH == .amd64 {
+			for in_len - ip >= 33 && out_len - op >= 64 {
+				when PROGRESS {
+					if op >= progress.mark {
+						break
+					}
+				}
+				t := int(src[ip])
+				if t >= 0xF0 {
+					break
+				}
+				lz4_copy_16(dst[op:], src[ip + 1:])
+				op += t >> 4
+				ip += t >> 4 + 1
+				o := int(lz4_load_u16(src[ip:]))
+				ip += 2
+				if t & 15 == 15 || o < 8 || o > op - history_start {
+					token, offset, pending = t, o, true
+					break
+				}
+				m := op - o
 				lz4_copy_8(dst[op:], dst[m:])
 				lz4_copy_8(dst[op + 8:], dst[m + 8:])
-				if token & 15 > 12 {
+				if t & 15 > 12 {
 					lz4_copy_8(dst[op + 16:], dst[m + 16:])
 				}
-				op += token & 15 + LZ4_MIN_MATCH
-				continue
+				op += t & 15 + LZ4_MIN_MATCH
 			}
-		} else {
-			if literals < 15 && in_len - ip >= 16 && out_len - op >= 16 {
-				lz4_copy_16(dst[op:], src[ip:])
-			} else {
-				if literals == 15 {
-					for {
-						if ip >= in_len {
-							return op, General_Error.Stream_Too_Short
-						}
-						b := int(src[ip])
-						ip += 1
-						literals += b
-						if b != 255 {
-							break
-						}
-						if literals > in_len {
-							return op, LZ4_Error.Literal_Overrun
-						}
-					}
-				}
-				if literals > in_len - ip {
-					return op, LZ4_Error.Literal_Overrun
-				}
-				if literals > out_len - op {
-					return op, General_Error.Output_Too_Short
-				}
-				if in_len - ip - literals >= 32 && out_len - op - literals >= 32 {
-					for i := 0; i < literals; i += 32 {
-						lz4_copy_16(dst[op + i:], src[ip + i:])
-						lz4_copy_16(dst[op + i + 16:], src[ip + i + 16:])
-					}
-				} else {
-					copy(output[op:op + literals], input[ip:ip + literals])
-				}
-			}
-			op += literals
-			ip += literals
+		}
 
-			if ip == in_len {
-				return op, nil
+		if !pending {
+			when PROGRESS {
+				if op >= progress.mark && lz4_progress_report(progress, op, i64(ip), i64(op - op_start)) {
+					return op, progress.err
+				}
 			}
-			if in_len - ip < 2 {
+			if ip >= in_len {
 				return op, General_Error.Stream_Too_Short
 			}
-			offset = int(lz4_load_u16(src[ip:]))
-			ip += 2
+			token = int(src[ip])
+			ip += 1
+			literals := token >> 4
+			if ODIN_ARCH != .amd64 && literals < 15 && in_len - ip >= 32 && out_len - op >= 64 {
+				lz4_copy_16(dst[op:], src[ip:])
+				op += literals
+				ip += literals
+				offset = int(lz4_load_u16(src[ip:]))
+				ip += 2
+				if token & 15 < 15 && offset >= 8 && offset <= op - history_start {
+					m := op - offset
+					lz4_copy_8(dst[op:], dst[m:])
+					lz4_copy_8(dst[op + 8:], dst[m + 8:])
+					if token & 15 > 12 {
+						lz4_copy_8(dst[op + 16:], dst[m + 16:])
+					}
+					op += token & 15 + LZ4_MIN_MATCH
+					continue
+				}
+			} else {
+				if literals < 15 && in_len - ip >= 16 && out_len - op >= 16 {
+					lz4_copy_16(dst[op:], src[ip:])
+				} else {
+					if literals == 15 {
+						for {
+							if ip >= in_len {
+								return op, General_Error.Stream_Too_Short
+							}
+							b := int(src[ip])
+							ip += 1
+							literals += b
+							if b != 255 {
+								break
+							}
+							if literals > in_len {
+								return op, LZ4_Error.Literal_Overrun
+							}
+						}
+					}
+					if literals > in_len - ip {
+						return op, LZ4_Error.Literal_Overrun
+					}
+					if literals > out_len - op {
+						return op, General_Error.Output_Too_Short
+					}
+					if in_len - ip - literals >= 32 && out_len - op - literals >= 32 {
+						for i := 0; i < literals; i += 32 {
+							lz4_copy_16(dst[op + i:], src[ip + i:])
+							lz4_copy_16(dst[op + i + 16:], src[ip + i + 16:])
+						}
+					} else {
+						copy(output[op:op + literals], input[ip:ip + literals])
+					}
+				}
+				op += literals
+				ip += literals
+
+				if ip == in_len {
+					return op, nil
+				}
+				if in_len - ip < 2 {
+					return op, General_Error.Stream_Too_Short
+				}
+				offset = int(lz4_load_u16(src[ip:]))
+				ip += 2
+			}
 		}
 
 		length := token & 15
