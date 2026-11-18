@@ -35,8 +35,18 @@ expand_from_context :: proc(z: ^compress.Context, factor: int, expected_output_s
 	last   := 0
 	v      := 0
 	length := 0
-	for len(z.output) - start < expected {
-		symbol, available := expand_symbol(z, &e, last) or_return
+
+	b := Bits{z.code_buffer, z.num_bits}
+	defer {
+		z.code_buffer = b.buffer
+		z.num_bits    = b.count
+	}
+
+	o := out_load(z)
+	defer out_store(z, &o)
+
+	for o.at - start < expected {
+		symbol, available := expand_symbol_bits(z, &b, &e, last) or_return
 		if !available {
 			break
 		}
@@ -46,11 +56,11 @@ expand_from_context :: proc(z: ^compress.Context, factor: int, expected_output_s
 			if symbol == REDUCE_DLE {
 				state = .DLE
 			} else {
-				write_literal(z, start, expected, u8(symbol)) or_return
+				out_literal(z, &o, start, expected, u8(symbol)) or_return
 			}
 		case .DLE:
 			if symbol == 0 {
-				write_literal(z, start, expected, REDUCE_DLE) or_return
+				out_literal(z, &o, start, expected, REDUCE_DLE) or_return
 				state = .Literal
 			} else {
 				v      = symbol
@@ -62,13 +72,13 @@ expand_from_context :: proc(z: ^compress.Context, factor: int, expected_output_s
 			state   = .Distance
 		case .Distance:
 			distance := (v >> length_bits & distance_mask) << 8 + symbol + 1
-			write_match(z, start, expected, distance, length + REDUCE_MIN_MATCH) or_return
+			out_match(z, &o, start, expected, distance, length + REDUCE_MIN_MATCH) or_return
 			state = .Literal
 		}
 		last = symbol
 	}
 
-	if len(z.output) - start != expected {
+	if o.at - start != expected {
 		return General_Error.Stream_Too_Short
 	}
 	return nil
@@ -121,6 +131,41 @@ expand_symbol :: #force_inline proc(z: ^compress.Context, e: ^Expand, last: int)
 	symbol = int(z.code_buffer & 0xff)
 	z.code_buffer >>= 8
 	z.num_bits     -= 8
+	return symbol, true, nil
+}
+
+@(private)
+expand_symbol_bits :: #force_inline proc(z: ^compress.Context, b: ^Bits, e: ^Expand, last: int) -> (symbol: int, available: bool, err: Error) #no_bounds_check {
+	if b.count < 9 {
+		bits_refill(z, b) or_return
+		if b.count < 9 {
+			z.code_buffer = b.buffer
+			z.num_bits    = b.count
+			symbol, available, err = expand_symbol_slow(z, e, last)
+			b.buffer = z.code_buffer
+			b.count  = z.num_bits
+			return
+		}
+	}
+
+	count := int(e.counts[last])
+	if count > 0 {
+		if b.buffer & 1 == 0 {
+			bits  := uint(e.index_bits[last])
+			index := int(b.buffer >> 1 & (u64(1) << bits - 1))
+			b.buffer >>= bits + 1
+			b.count   -= u64(bits + 1)
+			if index >= count {
+				return 0, false, PKZIP_Legacy_Error.Invalid_Follower_Index
+			}
+			return int(e.followers[last][index]), true, nil
+		}
+		b.buffer >>= 1
+		b.count   -= 1
+	}
+	symbol = int(b.buffer & 0xff)
+	b.buffer >>= 8
+	b.count   -= 8
 	return symbol, true, nil
 }
 

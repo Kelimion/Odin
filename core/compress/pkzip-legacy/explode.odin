@@ -35,8 +35,17 @@ explode_from_context :: proc(z: ^compress.Context, options: Implode_Options, exp
 	distance_bits := uint(7 if .Large_Window in options else 6)
 	min_match     := 3 if literal_tree else 2
 
-	for len(z.output) - start < expected {
-		flag, available := read_bits(z, 1) or_return
+	b := Bits{z.code_buffer, z.num_bits}
+	defer {
+		z.code_buffer = b.buffer
+		z.num_bits    = b.count
+	}
+
+	o := out_load(z)
+	defer out_store(z, &o)
+
+	for o.at - start < expected {
+		flag, available := bits_read(z, &b, 1) or_return
 		if !available {
 			break
 		}
@@ -44,41 +53,41 @@ explode_from_context :: proc(z: ^compress.Context, options: Implode_Options, exp
 		if flag == 1 {
 			symbol: int
 			if literal_tree {
-				symbol, available = explode_decode(z, &literals) or_return
+				symbol, available = explode_decode_bits(z, &b, &literals) or_return
 			} else {
-				symbol, available = read_bits(z, 8) or_return
+				symbol, available = bits_read(z, &b, 8) or_return
 			}
 			if !available {
 				break
 			}
-			write_literal(z, start, expected, u8(symbol)) or_return
+			out_literal(z, &o, start, expected, u8(symbol)) or_return
 			continue
 		}
 
 		low, high, length, extra: int
-		low, available = read_bits(z, distance_bits) or_return
+		low, available = bits_read(z, &b, distance_bits) or_return
 		if !available {
 			break
 		}
-		high, available = explode_decode(z, &distances) or_return
+		high, available = explode_decode_bits(z, &b, &distances) or_return
 		if !available {
 			break
 		}
-		length, available = explode_decode(z, &lengths) or_return
+		length, available = explode_decode_bits(z, &b, &lengths) or_return
 		if !available {
 			break
 		}
 		if length == IMPLODE_EXTRA_LENGTH {
-			extra, available = read_bits(z, 8) or_return
+			extra, available = bits_read(z, &b, 8) or_return
 			if !available {
 				break
 			}
 		}
 		distance := high << distance_bits + low + 1
-		write_match(z, start, expected, distance, length + extra + min_match) or_return
+		out_match(z, &o, start, expected, distance, length + extra + min_match) or_return
 	}
 
-	if len(z.output) - start != expected {
+	if o.at - start != expected {
 		return General_Error.Stream_Too_Short
 	}
 	return nil
@@ -159,6 +168,29 @@ explode_decode :: #force_inline proc(z: ^compress.Context, t: ^Implode_Tree) -> 
 	}
 	z.code_buffer >>= length
 	z.num_bits     -= length
+	return int(entry & 0xff), true, nil
+}
+
+@(private)
+explode_decode_bits :: #force_inline proc(z: ^compress.Context, b: ^Bits, t: ^Implode_Tree) -> (symbol: int, available: bool, err: Error) #no_bounds_check {
+	if b.count < IMPLODE_MAX_CODE_LENGTH {
+		bits_refill(z, b) or_return
+	}
+	entry  := t.table[b.buffer & (1 << IMPLODE_PRIMARY_BITS - 1)]
+	length := u64(entry >> 8)
+	if length == 0 {
+		z.code_buffer = b.buffer
+		z.num_bits    = b.count
+		symbol, available, err = explode_decode_slow(z, t)
+		b.buffer = z.code_buffer
+		b.count  = z.num_bits
+		return
+	}
+	if length > b.count {
+		return 0, false, nil
+	}
+	b.buffer >>= length
+	b.count   -= length
 	return int(entry & 0xff), true, nil
 }
 

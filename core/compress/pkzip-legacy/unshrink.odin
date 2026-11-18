@@ -31,63 +31,100 @@ unshrink_from_context :: proc(z: ^compress.Context, expected_output_size := -1, 
 	defer free(s)
 	unshrink_init(s)
 
+	cache_raw := runtime.mem_alloc_non_zeroed(size_of(Unshrink_Cache), align_of(Unshrink_Cache)) or_return
+	c         := (^Unshrink_Cache)(raw_data(cache_raw))
+	defer free(c)
+	c.length = {}
+
 	code_size := uint(SHRINK_MIN_CODE_SIZE)
 	next_free := SHRINK_FIRST_FREE_CODE
 
-	previous, available := unshrink_read_code(z, s, &code_size, &next_free) or_return
+	b := Bits{z.code_buffer, z.num_bits}
+	defer {
+		z.code_buffer = b.buffer
+		z.num_bits    = b.count
+	}
+
+	o := out_load(z)
+	defer out_store(z, &o)
+
+	previous, available := unshrink_read_code_bits(z, &b, s, &code_size, &next_free) or_return
 	if available {
 		if previous > 255 {
 			return PKZIP_Legacy_Error.Invalid_First_Code
 		}
-		write_literal(z, start, expected, u8(previous)) or_return
+		out_literal(z, &o, start, expected, u8(previous)) or_return
 	}
-	first_byte := u8(previous)
+	first_byte      := u8(previous)
+	previous_at     := start
+	previous_length := 1
 
-	for available && len(z.output) - start < expected {
+	for available && o.at - start < expected {
 		code: int
-		code, available = unshrink_read_code(z, s, &code_size, &next_free) or_return
+		code, available = unshrink_read_code_bits(z, &b, s, &code_size, &next_free) or_return
 		if !available {
 			break
 		}
 
-		sp          := len(s.stack)
-		current     := code
-		substituted := false
-		for current > 255 {
-			if current == SHRINK_CONTROL_CODE {
-				return PKZIP_Legacy_Error.Invalid_Code
-			}
-			if !s.used[current] {
-				if current != next_free || substituted || sp <= 1 {
+		at     := o.at
+		length := int(c.length[code])
+		cached := length > 0 && s.used[code]
+		sp     := len(s.stack)
+		if cached {
+			first_byte = o.data[c.position[code]]
+		} else {
+			current     := code
+			substituted := false
+			for current > 255 {
+				if current == SHRINK_CONTROL_CODE {
 					return PKZIP_Legacy_Error.Invalid_Code
 				}
-				substituted = true
+				if !s.used[current] {
+					if current != next_free || substituted || sp <= 1 {
+						return PKZIP_Legacy_Error.Invalid_Code
+					}
+					substituted = true
+					sp -= 1
+					s.stack[sp] = first_byte
+					current = previous
+					continue
+				}
+				if sp <= 1 || int(s.parent[current]) == current {
+					return PKZIP_Legacy_Error.Invalid_Code
+				}
 				sp -= 1
-				s.stack[sp] = first_byte
-				current = previous
-				continue
-			}
-			if sp <= 1 || int(s.parent[current]) == current {
-				return PKZIP_Legacy_Error.Invalid_Code
+				s.stack[sp] = s.value[current]
+				current = int(s.parent[current])
 			}
 			sp -= 1
-			s.stack[sp] = s.value[current]
-			current = int(s.parent[current])
+			s.stack[sp] = u8(current)
+			first_byte  = u8(current)
+			length      = len(s.stack) - sp
 		}
-		sp -= 1
-		s.stack[sp] = u8(current)
-		first_byte  = u8(current)
 
 		if next_free < SHRINK_TABLE_SIZE {
+			parent_used := s.used[previous]
 			unshrink_add(s, next_free, previous, first_byte)
+			c.length[next_free]   = u16(previous_length + 1) if parent_used else 0
+			c.position[next_free] = previous_at
 			next_free = unshrink_next_free(s, next_free + 1)
 		}
-		previous = code
 
-		write_bytes(z, start, expected, s.stack[sp:]) or_return
+		if cached {
+			out_match(z, &o, start, expected, at - c.position[code], length) or_return
+		} else {
+			out_bytes(z, &o, start, expected, s.stack[sp:]) or_return
+		}
+		if code > 255 {
+			c.length[code]   = u16(length)
+			c.position[code] = at
+		}
+		previous        = code
+		previous_at     = at
+		previous_length = length
 	}
 
-	if len(z.output) - start != expected {
+	if o.at - start != expected {
 		return General_Error.Stream_Too_Short
 	}
 	return nil
@@ -139,6 +176,52 @@ unshrink_read_code :: proc(z: ^compress.Context, s: ^Unshrink, code_size: ^uint,
 			return 0, false, PKZIP_Legacy_Error.Invalid_Control_Code
 		}
 	}
+}
+
+@(private)
+unshrink_read_code_bits :: #force_inline proc(z: ^compress.Context, b: ^Bits, s: ^Unshrink, code_size: ^uint, next_free: ^int) -> (code: int, available: bool, err: Error) {
+	code, available = bits_read(z, b, code_size^) or_return
+	if available && code == SHRINK_CONTROL_CODE {
+		z.code_buffer = b.buffer
+		z.num_bits    = b.count
+		size, free := code_size^, next_free^
+		code, available, size, free, err = unshrink_control(z, s, size, free)
+		code_size^ = size
+		next_free^ = free
+		b.buffer = z.code_buffer
+		b.count  = z.num_bits
+	}
+	return
+}
+
+@(private)
+unshrink_control :: proc(z: ^compress.Context, s: ^Unshrink, code_size: uint, next_free: int) -> (code: int, available: bool, size: uint, free: int, err: Error) {
+	size, free = code_size, next_free
+	code = SHRINK_CONTROL_CODE
+	for code == SHRINK_CONTROL_CODE {
+		command: int
+		command, available = read_bits(z, size) or_return
+		if !available {
+			return 0, false, size, free, General_Error.Stream_Too_Short
+		}
+		switch command {
+		case SHRINK_INCREASE_CODE_SIZE:
+			if size >= SHRINK_MAX_CODE_SIZE {
+				return 0, false, size, free, PKZIP_Legacy_Error.Code_Size_Too_Large
+			}
+			size += 1
+		case SHRINK_PARTIAL_CLEAR:
+			unshrink_partial_clear(s)
+			free = unshrink_next_free(s, SHRINK_FIRST_FREE_CODE)
+		case:
+			return 0, false, size, free, PKZIP_Legacy_Error.Invalid_Control_Code
+		}
+		code, available = read_bits(z, size) or_return
+		if !available {
+			return
+		}
+	}
+	return
 }
 
 @(private)

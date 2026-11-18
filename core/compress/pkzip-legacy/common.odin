@@ -1,6 +1,7 @@
 // Decoders for PKZIP's legacy compression methods: Shrink (1), Reduce (2-5) and Implode (6).
 package compress_pkzip_legacy
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:compress"
 
@@ -119,6 +120,25 @@ Unshrink :: struct {
 }
 
 @(private)
+Bits :: struct {
+	buffer: u64,
+	count:  u64,
+}
+
+@(private)
+Out :: struct {
+	data:     [^]u8,
+	at:       int,
+	capacity: int,
+}
+
+@(private)
+Unshrink_Cache :: struct {
+	position: [SHRINK_TABLE_SIZE]int,
+	length:   [SHRINK_TABLE_SIZE]u16,
+}
+
+@(private)
 Expand :: struct {
 	followers:  [256][REDUCE_MAX_FOLLOWERS]u8,
 	counts:     [256]u8,
@@ -183,4 +203,40 @@ read_bits_required :: #force_inline proc(z: ^compress.Context, count: uint) -> (
 		return 0, General_Error.Stream_Too_Short
 	}
 	return
+}
+
+@(private)
+bits_refill :: #force_inline proc(z: ^compress.Context, b: ^Bits) -> (err: Error) #no_bounds_check {
+	if len(z.window) >= 8 && b.count <= 56 {
+		bytes := (64 - b.count) >> 3
+		total := b.count + bytes << 3
+		value := u64(intrinsics.unaligned_load((^u64le)(raw_data(z.window)))) << b.count
+		if total < 64 {
+			value &= u64(1) << total - 1
+		}
+		b.buffer |= value
+		b.count   = total
+		z.window  = z.window[bytes:]
+		return nil
+	}
+	z.code_buffer = b.buffer
+	z.num_bits    = b.count
+	err = refill_bits(z)
+	b.buffer = z.code_buffer
+	b.count  = z.num_bits
+	return
+}
+
+@(private)
+bits_read :: #force_inline proc(z: ^compress.Context, b: ^Bits, count: uint) -> (value: int, available: bool, err: Error) #no_bounds_check {
+	if b.count < u64(count) {
+		bits_refill(z, b) or_return
+		if b.count < u64(count) {
+			return 0, false, nil
+		}
+	}
+	value = int(b.buffer & (u64(1) << count - 1))
+	b.buffer >>= count
+	b.count   -= u64(count)
+	return value, true, nil
 }
