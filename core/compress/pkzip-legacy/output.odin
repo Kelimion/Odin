@@ -98,7 +98,7 @@ out_match :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit, dis
 	buffer := o.data
 	from   := at - distance
 	o.at    = at + length
-	if from >= start && distance >= 8 && at + length + 8 <= o.capacity {
+	if from >= start && distance >= 8 && at + length + 8 <= min(o.capacity, start + limit) {
 		for i := 0; i < length; i += 8 {
 			intrinsics.unaligned_store((^u64)(&buffer[at + i]), intrinsics.unaligned_load((^u64)(&buffer[from + i])))
 		}
