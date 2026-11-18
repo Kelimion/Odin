@@ -680,11 +680,19 @@ lz4_insert :: #force_inline proc "contextless" (s: ^LZ4, src: [^]u8, next: ^int,
 lz4_find :: #force_inline proc "contextless" (s: ^LZ4, src: [^]u8, ip, low, length_limit: int, depth, nice: i32) -> (best_length, best_offset: int) {
 	sequence  := lz4_load_u32(src[ip:])
 	candidate := int(s.head[lz4_hash(sequence)])
+	next_head := int(s.head[lz4_hash(lz4_load_u32(src[ip + 1:]))])
+	intrinsics.prefetch_read_data(&s.chain[next_head & (LZ4_WINDOW_SIZE - 1)], 3)
+	intrinsics.prefetch_read_data(&src[next_head], 3)
+	if candidate >= ip {
+		return 0, 0
+	}
 	best_length = LZ4_MIN_MATCH - 1
 	max_length := length_limit - ip
+	floor      := max(low, ip - LZ4_MAX_OFFSET)
+	target     := src[ip + best_length]
 	depth := depth
-	for depth > 0 && candidate >= low && candidate < ip && ip - candidate <= LZ4_MAX_OFFSET {
-		if src[candidate + best_length] == src[ip + best_length] && lz4_load_u32(src[candidate:]) == sequence {
+	for depth > 0 && candidate >= floor {
+		if src[candidate + best_length] == target && lz4_load_u32(src[candidate:]) == sequence {
 			length := LZ4_MIN_MATCH + lz4_count(src, ip + LZ4_MIN_MATCH, candidate + LZ4_MIN_MATCH, length_limit)
 			if length > best_length {
 				best_length = length
@@ -692,6 +700,7 @@ lz4_find :: #force_inline proc "contextless" (s: ^LZ4, src: [^]u8, ip, low, leng
 				if length >= int(nice) || length >= max_length {
 					break
 				}
+				target = src[ip + best_length]
 			}
 		}
 		delta := int(s.chain[candidate & (LZ4_WINDOW_SIZE - 1)])
@@ -968,14 +977,22 @@ lz4_emit_pending :: #force_inline proc "contextless" (dst: [^]u8, op: int, src: 
 }
 
 @(private)
-lz4_gather :: proc(s: ^LZ4, src: [^]u8, ip, low, length_limit: int, depth, nice: i32, matches: []$T) -> (count: int) #no_bounds_check {
+lz4_gather :: #force_inline proc "contextless" (s: ^LZ4, src: [^]u8, ip, low, length_limit: int, depth, nice: i32, matches: []$T) -> (count: int) #no_bounds_check {
 	sequence  := lz4_load_u32(src[ip:])
 	candidate := int(s.head[lz4_hash(sequence)])
+	next_head := int(s.head[lz4_hash(lz4_load_u32(src[ip + 1:]))])
+	intrinsics.prefetch_read_data(&s.chain[next_head & (LZ4_WINDOW_SIZE - 1)], 3)
+	intrinsics.prefetch_read_data(&src[next_head], 3)
+	if candidate >= ip {
+		return 0
+	}
 	best_length := LZ4_MIN_MATCH - 1
 	max_length  := length_limit - ip
+	floor       := max(low, ip - LZ4_MAX_OFFSET)
+	target      := src[ip + best_length]
 	depth := depth
-	for depth > 0 && candidate >= low && candidate < ip && ip - candidate <= LZ4_MAX_OFFSET {
-		if src[candidate + best_length] == src[ip + best_length] && lz4_load_u32(src[candidate:]) == sequence {
+	for depth > 0 && candidate >= floor {
+		if src[candidate + best_length] == target && lz4_load_u32(src[candidate:]) == sequence {
 			length := LZ4_MIN_MATCH + lz4_count(src, ip + LZ4_MIN_MATCH, candidate + LZ4_MIN_MATCH, length_limit)
 			if length > best_length {
 				best_length = length
@@ -987,6 +1004,7 @@ lz4_gather :: proc(s: ^LZ4, src: [^]u8, ip, low, length_limit: int, depth, nice:
 				if length >= int(nice) || length >= max_length {
 					break
 				}
+				target = src[ip + best_length]
 			}
 		}
 		delta := int(s.chain[candidate & (LZ4_WINDOW_SIZE - 1)])
