@@ -7,7 +7,7 @@ import "core:crypto/_aes/ct64"
 import "core:crypto/aes"
 import crypto_hash "core:crypto/hash"
 import "core:crypto/hmac"
-import "core:crypto/pbkdf2"
+import "core:crypto/legacy/sha1"
 import "core:encoding/endian"
 import "core:hash"
 import "core:io"
@@ -91,7 +91,7 @@ _aes_init :: proc(c: ^Cipher, s: ^Section, strength: int, password: string) -> (
 	derived: [2 * aes.KEY_SIZE_256 + AES_VERIFIER_SIZE]u8
 	defer crypto.zero_explicit(&derived, size_of(derived))
 	keys := derived[:2 * key_size + AES_VERIFIER_SIZE]
-	pbkdf2.derive(.Insecure_SHA1, transmute([]u8)password, head[:salt_size], AES_ITERATIONS, keys)
+	_aes_derive_keys(transmute([]u8)password, head[:salt_size], keys)
 	if crypto.compare_constant_time(keys[2 * key_size:], head[salt_size:][:AES_VERIFIER_SIZE]) != 1 {
 		return archive.General_Error.Wrong_Password
 	}
@@ -106,6 +106,74 @@ _aes_init :: proc(c: ^Cipher, s: ^Section, strength: int, password: string) -> (
 	c.tag     = s.end
 	s.cipher  = c
 	return nil
+}
+
+@(private)
+_aes_derive_keys :: proc(password, salt, dst: []u8) {
+	key_block, pad: [sha1.BLOCK_SIZE]u8
+	if len(password) > sha1.BLOCK_SIZE {
+		kctx: sha1.Context
+		sha1.init(&kctx)
+		sha1.update(&kctx, password)
+		sha1.final(&kctx, key_block[:sha1.DIGEST_SIZE])
+	} else {
+		copy(key_block[:], password)
+	}
+	inner, outer, ctx: sha1.Context
+	for b, i in key_block {
+		pad[i] = b ~ 0x36
+	}
+	sha1.init(&inner)
+	sha1.update(&inner, pad[:])
+	for b, i in key_block {
+		pad[i] = b ~ 0x5c
+	}
+	sha1.init(&outer)
+	sha1.update(&outer, pad[:])
+
+	blk: [sha1.BLOCK_SIZE]u8
+	blk[sha1.DIGEST_SIZE] = 0x80
+	endian.unchecked_put_u64be(blk[sha1.BLOCK_SIZE - 8:], (sha1.BLOCK_SIZE + sha1.DIGEST_SIZE) * 8)
+
+	t: [sha1.DIGEST_SIZE]u8
+	counter: [4]u8
+	out := dst
+	for index := u32(1); len(out) > 0; index += 1 {
+		endian.unchecked_put_u32be(counter[:], index)
+		ctx = inner
+		sha1.update(&ctx, salt)
+		sha1.update(&ctx, counter[:])
+		sha1.final(&ctx, blk[:sha1.DIGEST_SIZE])
+		ctx = outer
+		sha1.update(&ctx, blk[:])
+		for w, i in ctx.state {
+			endian.unchecked_put_u32be(blk[i * 4:], w)
+		}
+		copy(t[:], blk[:sha1.DIGEST_SIZE])
+		for _ in 1 ..< AES_ITERATIONS {
+			ctx = inner
+			sha1.update(&ctx, blk[:])
+			for w, i in ctx.state {
+				endian.unchecked_put_u32be(blk[i * 4:], w)
+			}
+			ctx = outer
+			sha1.update(&ctx, blk[:])
+			for w, i in ctx.state {
+				endian.unchecked_put_u32be(blk[i * 4:], w)
+			}
+			for i in 0 ..< sha1.DIGEST_SIZE {
+				t[i] ~= blk[i]
+			}
+		}
+		out = out[copy(out, t[:]):]
+	}
+	crypto.zero_explicit(&key_block, size_of(key_block))
+	crypto.zero_explicit(&pad, size_of(pad))
+	crypto.zero_explicit(&inner, size_of(inner))
+	crypto.zero_explicit(&outer, size_of(outer))
+	crypto.zero_explicit(&ctx, size_of(ctx))
+	crypto.zero_explicit(&blk, size_of(blk))
+	crypto.zero_explicit(&t, size_of(t))
 }
 
 @(private)
@@ -332,7 +400,7 @@ _encrypt_begin :: proc(zw: ^Writer, c: ^Cipher, password: string) -> (err: Error
 
 	derived: [2 * aes.KEY_SIZE_256 + AES_VERIFIER_SIZE]u8
 	defer crypto.zero_explicit(&derived, size_of(derived))
-	pbkdf2.derive(.Insecure_SHA1, transmute([]u8)password, head[:AES_SALT_SIZE], AES_ITERATIONS, derived[:])
+	_aes_derive_keys(transmute([]u8)password, head[:AES_SALT_SIZE], derived[:])
 	copy(head[AES_SALT_SIZE:], derived[2 * aes.KEY_SIZE_256:])
 
 	aes.init_ecb(&c.block, derived[:aes.KEY_SIZE_256])
