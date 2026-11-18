@@ -269,7 +269,7 @@ test_write_solid_limits :: proc(t: ^testing.T) {
 		{{solid = true, method = .Store}, {}, 5},
 		{{solid = true, method = .Store, solid_size = 1 << 20}, {}, 1},
 		{{solid = true}, {{}, {method = .BZip2}, {}, {}, {}}, 3},
-		{{solid = true}, {{}, {}, {level = 8}, {level = 8}, {}}, 3},
+		{{solid = true}, {{}, {}, {level = 1}, {level = 1}, {}}, 3},
 		{{solid = true}, {{}, {}, {filter = .Delta, delta_distance = 2}, {}, {}}, 3},
 		{{solid = true, method = .BZip2}, {{}, {method = .BZip2}, {method = .BZip2, level = 9}, {}, {}}, 1},
 		{{solid = true}, {{}, {}, {filter = .BCJ_ARM}, {filter = .BCJ_ARM}, {}}, 3},
