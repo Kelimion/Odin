@@ -90,11 +90,11 @@ decompress_frame_from_context :: proc(z: ^compress.Context, expected_output_size
 
 	progress := lz4_progress_init(options, 0, i64(input_size), i64(expected))
 	frames   := 0
-	for {
+	frame_loop: for {
 		if frames > 0 {
 			next, next_err := compress.peek_data(z, u32le)
 			if next_err != nil || !lz4_is_magic(u32(next)) {
-				return nil
+				break frame_loop
 			}
 		}
 		magic, magic_err := compress.read_data(z, u32le)
@@ -106,7 +106,7 @@ decompress_frame_from_context :: proc(z: ^compress.Context, expected_output_size
 		case u32(magic) == FRAME_MAGIC:
 			written, err = lz4_decode_frame(z, written, limit, input_size, dictionary, &scratch, &progress)
 			if err != nil {
-				return
+				break frame_loop
 			}
 		case u32(magic) >= SKIPPABLE_MAGIC_MIN && u32(magic) <= SKIPPABLE_MAGIC_MAX:
 			size, size_err := compress.read_data(z, u32le)
@@ -120,13 +120,17 @@ decompress_frame_from_context :: proc(z: ^compress.Context, expected_output_size
 		case u32(magic) == LEGACY_MAGIC:
 			written, err = lz4_decode_legacy(z, written, limit, &scratch, &progress)
 			if err != nil {
-				return
+				break frame_loop
 			}
 		case:
 			return LZ4_Error.Invalid_Magic
 		}
 		frames += 1
 	}
+	if expected >= 0 && (err == General_Error.Output_Too_Short || (err == nil && written != expected)) {
+		return General_Error.Size_Mismatch
+	}
+	return
 }
 
 decompress_frame_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, dictionary: []u8 = nil, allocator := context.allocator) -> (err: Error) {
@@ -773,6 +777,9 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 		switch r.state {
 		case .Done:
 			r.done = true
+			if r.total_out >= 0 && r.total != r.total_out {
+				return General_Error.Size_Mismatch
+			}
 			return nil
 
 		case .Magic:
@@ -797,7 +804,7 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 				r.content_size = h.content_size
 				if h.content_size >= 0 {
 					if room >= 0 && h.content_size > room {
-						return General_Error.Output_Too_Short
+						return General_Error.Size_Mismatch if r.total_out >= 0 else General_Error.Output_Too_Short
 					}
 					room          = h.content_size
 					r.frame_limit = r.total + h.content_size
@@ -889,7 +896,12 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 					return LZ4_Error.Block_Checksum_Failed
 				}
 			}
-			overflow := Error(LZ4_Error.Content_Size_Mismatch) if r.content_size >= 0 else Error(General_Error.Output_Too_Short)
+			overflow := Error(General_Error.Output_Too_Short)
+			if r.content_size >= 0 {
+				overflow = LZ4_Error.Content_Size_Mismatch
+			} else if r.total_out >= 0 {
+				overflow = General_Error.Size_Mismatch
+			}
 			start := r.written
 			if r.independent {
 				r.base = start
@@ -948,7 +960,10 @@ lz4_stream_fill :: proc(r: ^Frame_Reader) -> (err: Error) {
 			end, decode_err := lz4_decode(r.window[:start + need], start, start, data, nil, false, nil)
 			if decode_err != nil {
 				if decode_err == General_Error.Output_Too_Short {
-					return General_Error.Output_Too_Short if need < LEGACY_BLOCK_SIZE else LZ4_Error.Block_Too_Large
+					if need >= LEGACY_BLOCK_SIZE {
+						return LZ4_Error.Block_Too_Large
+					}
+					return General_Error.Size_Mismatch if r.total_out >= 0 else General_Error.Output_Too_Short
 				}
 				return decode_err
 			}

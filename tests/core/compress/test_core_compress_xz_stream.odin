@@ -161,7 +161,7 @@ test_xz_stream_short_chunk_truncated :: proc(t: ^testing.T) {
 	for cut in ([?]int{at + 64, at + 1024, len(packed) - 64, len(packed)}) {
 		xz_stream_expect_agreement(t, packed[:cut], 0, cut, at)
 		out, err := xz_stream_decode(packed[:cut], {}, -1, {}, true, 4096)
-		testing.expectf(t, err == compress.Error(compress.XZ_Error.Size_Mismatch), "cut %d: %v", cut, err)
+		testing.expectf(t, err == compress.Error(compress.General_Error.Size_Mismatch), "cut %d: %v", cut, err)
 		delete(out)
 	}
 }
@@ -188,11 +188,11 @@ test_xz_stream_limits :: proc(t: ^testing.T) {
 			delete(out)
 
 			out, err = xz_stream_decode(data, {}, 80_001, {}, streamed, read_size)
-			testing.expect_value(t, err, compress.Error(XZE.Size_Mismatch))
+			testing.expect_value(t, err, compress.Error(GE.Size_Mismatch))
 			delete(out)
 
 			out, err = xz_stream_decode(data, {}, 79_999, {}, streamed, read_size)
-			testing.expect_value(t, err, compress.Error(XZE.Size_Mismatch))
+			testing.expect_value(t, err, compress.Error(GE.Size_Mismatch))
 			delete(out)
 
 			out, err = xz_stream_decode(data, {}, 80_001, {max_output_size = 80_000}, streamed, read_size)

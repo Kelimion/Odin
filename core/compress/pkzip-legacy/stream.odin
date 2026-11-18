@@ -342,7 +342,7 @@ _unshrink_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 
 		n := len(s.stack) - sp
 		if ready + n > out_end {
-			return General_Error.Output_Too_Short
+			return General_Error.Size_Mismatch
 		}
 		copy(window[ready:], s.stack[sp:])
 		ready += n
@@ -411,7 +411,7 @@ _expand_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 			distance := (v >> length_bits & distance_mask) << 8 + symbol + 1
 			n        := length + REDUCE_MIN_MATCH
 			if ready + n > out_end {
-				return General_Error.Output_Too_Short
+				return General_Error.Size_Mismatch
 			}
 			_copy_match(window, ready, distance, n, base)
 			ready += n
@@ -490,7 +490,7 @@ _explode_fill :: proc(r: ^Reader, end: int) -> (err: Error) #no_bounds_check {
 		}
 		n := length + extra + min_match
 		if ready + n > out_end {
-			return General_Error.Output_Too_Short
+			return General_Error.Size_Mismatch
 		}
 		_copy_match(window, ready, high << distance_bits + low + 1, n, base)
 		ready += n

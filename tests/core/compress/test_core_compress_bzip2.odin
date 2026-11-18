@@ -301,8 +301,8 @@ bzip2_exact_size :: proc(t: ^testing.T) {
 				testing.expectf(t, bytes.equal(output[:], data), "%v: output differs", kind)
 				testing.expectf(t, cap(output) == len(data), "%v: capacity %v for an exact size", kind, cap(output))
 			} else {
-				testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v: %v", kind, err)
-				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a limit of %v", kind, cap(output), expected)
+				testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v: %v", kind, err)
+				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a declared %v", kind, cap(output), expected)
 			}
 		}
 	}
@@ -354,13 +354,14 @@ bzip2_bomb_growth :: proc(t: ^testing.T) {
 		claimed: [dynamic]u8
 		defer delete(claimed)
 		err = bzip2.decompress(&claimed, stream[:], expected, {max_output_size = max(int)})
-		testing.expectf(t, err == nil, "expected %v: %v", expected, err)
+		want_err: compress.Error = nil if expected == want else compress.General_Error.Size_Mismatch
+		testing.expectf(t, err == want_err, "expected %v: %v", expected, err)
 		testing.expectf(t, cap(claimed) <= max(want, min(expected, bound)), "expected %v: capacity %v, bound %v", expected, cap(claimed), bound)
 	}
 
 	empty: [dynamic]u8
 	defer delete(empty)
-	testing.expect_value(t, bzip2.decompress(&empty, transmute([]u8)string("BZh9\x17\x72\x45\x38\x50\x90\x00\x00\x00\x00"), 1 << 30, {max_output_size = max(int)}), nil)
+	testing.expect_value(t, bzip2.decompress(&empty, transmute([]u8)string("BZh9\x17\x72\x45\x38\x50\x90\x00\x00\x00\x00"), 1 << 30, {max_output_size = max(int)}), compress.General_Error.Size_Mismatch)
 	testing.expect_value(t, len(empty), 0)
 	testing.expect_value(t, cap(empty), 0)
 }

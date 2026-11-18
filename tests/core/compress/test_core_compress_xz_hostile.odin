@@ -157,14 +157,14 @@ test_xz_hostile :: proc(t: ^testing.T) {
 		{"chain: LZMA2 dict prop 41", {stream_flags = {0, 1}, blocks = {{filters = {0x21, 0x01, 41}}}}, XZE.Invalid_Filter_Chain, 0},
 		{"chain: LZMA2 reserved prop bits", {stream_flags = {0, 1}, blocks = {{filters = {0x21, 0x01, 0x40}}}}, XZE.Invalid_Filter_Chain, 0},
 
-		{"data: LZMA2 ends before the compressed size", {stream_flags = {0, 1}, blocks = {{compressed = {mode = .Correct}, extra_data = {0x00, 0x00, 0x00, 0x00}}}}, XZE.Size_Mismatch, 0},
-		{"data: LZMA2 runs past the compressed size", {stream_flags = {0, 1}, blocks = {{compressed = {mode = .Value, value = 9}}}}, XZE.Size_Mismatch, 0},
+		{"data: LZMA2 ends before the compressed size", {stream_flags = {0, 1}, blocks = {{compressed = {mode = .Correct}, extra_data = {0x00, 0x00, 0x00, 0x00}}}}, GE.Size_Mismatch, 0},
+		{"data: LZMA2 runs past the compressed size", {stream_flags = {0, 1}, blocks = {{compressed = {mode = .Value, value = 9}}}}, GE.Size_Mismatch, 0},
 		{"data: first chunk without a dict reset", {stream_flags = {0, 1}, blocks = {{lzma2 = no_reset_copy}}}, LE.Invalid_Chunk, 0},
 		{"data: second block without a dict reset, copy", {stream_flags = {0, 1}, blocks = second_copy}, LE.Invalid_Chunk, 0},
 		{"data: second block without a dict reset, LZMA", {stream_flags = {0, 1}, blocks = second_lzma}, LE.Invalid_Chunk, 0},
 		{"data: lc + lp > 4", {stream_flags = {0, 1}, blocks = {{lzma2 = lclp}}}, LE.Invalid_Properties, 0},
-		{"data: uncompressed size too small", {stream_flags = {0, 1}, blocks = {{uncompressed = {mode = .Value, value = 6}}}}, XZE.Size_Mismatch, 0},
-		{"data: uncompressed size too large", {stream_flags = {0, 1}, blocks = {{uncompressed = {mode = .Value, value = 8}}}}, XZE.Size_Mismatch, 0},
+		{"data: uncompressed size too small", {stream_flags = {0, 1}, blocks = {{uncompressed = {mode = .Value, value = 6}}}}, GE.Size_Mismatch, 0},
+		{"data: uncompressed size too large", {stream_flags = {0, 1}, blocks = {{uncompressed = {mode = .Value, value = 8}}}}, GE.Size_Mismatch, 0},
 
 		{"trailer: non-zero block padding", {stream_flags = {0, 1}, blocks = {{block_padding = 1}}}, XZE.Invalid_Padding, 0},
 		{"trailer: CRC32 check", {stream_flags = {0, 1}, blocks = {{check_xor = 1}}}, XZE.Block_Checksum_Failed, 0},

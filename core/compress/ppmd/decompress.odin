@@ -398,7 +398,10 @@ decode_end :: proc(d: ^Decoder, m: ^$M, rc: ^$R, sym: int) -> (err: Error) {
 	if sym >= 0 && rc.code != 0 {
 		sym = decode_one(m, rc, r)
 		if sym != SYM_END {
-			return PPMd_Error.Corrupt_Data if !r.overrun else General_Error.Stream_Too_Short
+			if r.overrun {
+				return General_Error.Stream_Too_Short
+			}
+			return General_Error.Size_Mismatch if sym >= 0 else PPMd_Error.Corrupt_Data
 		}
 	}
 	if r.overrun {
@@ -408,7 +411,7 @@ decode_end :: proc(d: ^Decoder, m: ^$M, rc: ^$R, sym: int) -> (err: Error) {
 		return PPMd_Error.Corrupt_Data
 	}
 	if sym == SYM_END && d.size >= 0 && d.written != d.size {
-		return PPMd_Error.Unexpected_End_Marker
+		return General_Error.Size_Mismatch
 	}
 	if rc.code != 0 {
 		return PPMd_Error.Corrupt_Data

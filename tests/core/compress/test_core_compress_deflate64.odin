@@ -776,8 +776,8 @@ deflate64_limits :: proc(t: ^testing.T) {
 					testing.expectf(t, cap(output) == len(data), "%v: capacity %v for an exact size", kind, cap(output))
 				}
 			} else {
-				testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v, expected %v: %v", kind, expected, err)
-				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a limit of %v", kind, cap(output), expected)
+				testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v, expected %v: %v", kind, expected, err)
+				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a declared %v", kind, cap(output), expected)
 			}
 		}
 		for limit in ([]int{64 * 1024, 64 * 1024 + 1}) {
@@ -825,10 +825,12 @@ deflate64_expansion_reservation :: proc(t: ^testing.T) {
 
 		output: [dynamic]byte
 		err := deflate.inflate64_raw(&output, b.buf[:], hint, allocator = mem.tracking_allocator(&tracking))
-		testing.expectf(t, err == nil, "hint %v: %v", hint, err)
-		testing.expectf(t, len(output) == size, "hint %v: %v bytes", hint, len(output))
 		if hint == size {
+			testing.expectf(t, err == nil, "hint %v: %v", hint, err)
+			testing.expectf(t, len(output) == size, "hint %v: %v bytes", hint, len(output))
 			testing.expectf(t, cap(output) == size, "hint %v: capacity %v", hint, cap(output))
+		} else {
+			testing.expectf(t, err == compress.General_Error.Size_Mismatch, "hint %v: %v", hint, err)
 		}
 		testing.expectf(t, tracking.peak_memory_allocated <= i64(29128 * len(b.buf)), "hint %v: peak %v above the expansion bound %v", hint, tracking.peak_memory_allocated, 29128 * len(b.buf))
 		delete(output)
@@ -1257,14 +1259,18 @@ d64_differential :: proc(t: ^testing.T, format: D64_Format, stream: []byte, labe
 	}
 
 	if ok && len(reference) > 1 {
-		expected := 1 + rand.int_max(len(reference) - 1) if rand.int_max(2) == 0 else len(reference)
+		expected := len(reference)
+		switch rand.int_max(3) {
+		case 0: expected = 1 + rand.int_max(len(reference) - 1)
+		case 1: expected = len(reference) + 1 + rand.int_max(len(reference))
+		}
 		output: [dynamic]byte
 		defer delete(output)
 		err := d64_unpack(t, format, .Memory, stream, &output, expected)
 		if expected == len(reference) {
 			testing.expectf(t, err == nil && cap(output) == expected, "%v %v: exact size %v gave %v, capacity %v", label, format, expected, err, cap(output))
 		} else {
-			testing.expectf(t, err == compress.General_Error.Output_Too_Short && cap(output) <= expected, "%v %v: limit %v below %v gave %v, capacity %v", label, format, expected, len(reference), err, cap(output))
+			testing.expectf(t, err == compress.General_Error.Size_Mismatch && cap(output) <= expected, "%v %v: declared %v for %v gave %v, capacity %v", label, format, expected, len(reference), err, cap(output))
 		}
 	}
 	return

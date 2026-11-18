@@ -35,13 +35,13 @@ reader_init :: proc(r: ^Reader, z: ^compress.Context, flags := Decode_Flags{}, e
 	r.flags     = flags
 	r.options   = options
 	r.allocator = allocator
-	r.size      = expected_output_size
+	r.size      = compress.declared_size(expected_output_size)
 	r.total_in  = -1
 	defer r.err = err
 	if options.max_output_size < 0 || options.max_memory < 0 || options.chunk_size < 0 || options.progress_interval < 0 {
 		return General_Error.Incompatible_Options
 	}
-	if options.max_output_size > 0 && expected_output_size > options.max_output_size {
+	if options.max_output_size > 0 && r.size > options.max_output_size {
 		return General_Error.Output_Too_Short
 	}
 	if options.progress != nil {
@@ -52,14 +52,20 @@ reader_init :: proc(r: ^Reader, z: ^compress.Context, flags := Decode_Flags{}, e
 
 reader_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: Error) {
 	was_done := r.done
+	limit    := i64(r.options.max_output_size) if r.options.max_output_size > 0 else -1
+	overflow := Error(General_Error.Output_Too_Short)
+	if r.size >= 0 {
+		limit    = i64(r.size)
+		overflow = General_Error.Size_Mismatch
+	}
 	for n < len(p) && r.err == nil && !r.done {
 		if !r.in_block {
 			r.err = _next(r)
 			continue
 		}
 		dst := p[n:]
-		if limit := r.options.max_output_size; limit > 0 {
-			dst = dst[:min(i64(len(dst)), max(i64(limit) - r.produced, 0) + 1)]
+		if limit >= 0 {
+			dst = dst[:min(i64(len(dst)), max(limit - r.produced, 0) + 1)]
 		}
 		got:      int
 		read_err: Error
@@ -69,9 +75,9 @@ reader_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: Error) {
 			got, read_err = lzma.reader_read(&r.lzma, dst)
 		}
 		if got > 0 {
-			if limit := r.options.max_output_size; limit > 0 && r.produced + i64(got) > i64(limit) {
-				got   = int(i64(limit) - r.produced)
-				r.err = General_Error.Output_Too_Short
+			if limit >= 0 && r.produced + i64(got) > limit {
+				got   = int(limit - r.produced)
+				r.err = overflow
 			}
 			_block_output(r, dst[:got])
 			n += got
@@ -79,7 +85,7 @@ reader_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: Error) {
 				break
 			}
 			if r.has_uncompressed && r.block_out > r.uncompressed {
-				r.err = XZ_Error.Size_Mismatch
+				r.err = General_Error.Size_Mismatch
 				break
 			}
 		}
@@ -92,7 +98,7 @@ reader_read :: proc(r: ^Reader, p: []u8) -> (n: int, err: Error) {
 		}
 	}
 	if r.done && !was_done && r.err == nil && r.size >= 0 && r.produced != i64(r.size) {
-		r.err = XZ_Error.Size_Mismatch
+		r.err = General_Error.Size_Mismatch
 	}
 	if (n > 0 || (r.done && !was_done)) && r.err == nil {
 		r.err = compress.report_progress(r.options, _consumed(r), r.produced, r.total_in, i64(r.size))
@@ -660,6 +666,9 @@ _start_block :: proc(r: ^Reader, first: u8) -> (err: Error) {
 
 	expected := -1
 	if r.has_uncompressed {
+		if r.size >= 0 && r.uncompressed > u64(max(i64(r.size) - r.produced, 0)) {
+			return General_Error.Size_Mismatch
+		}
 		if limit := r.options.max_output_size; limit > 0 && r.uncompressed > u64(max(i64(limit) - r.produced, 0)) {
 			return General_Error.Output_Too_Short
 		}
@@ -731,11 +740,11 @@ _block_error :: proc(r: ^Reader, err: Error) -> Error {
 	if r.lzma.err != nil {
 		cause = r.lzma.err
 	}
-	if cause == compress.LZMA_Error.Size_Mismatch || (r.has_uncompressed && cause == General_Error.Output_Too_Short) {
-		return XZ_Error.Size_Mismatch
+	if r.has_uncompressed && cause == General_Error.Output_Too_Short {
+		return General_Error.Size_Mismatch
 	}
 	if r.bounded && cause == General_Error.Stream_Too_Short && !r.block_eof {
-		return XZ_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	return cause
 }
@@ -776,10 +785,10 @@ _finish_block :: proc(r: ^Reader) -> (err: Error) {
 				return General_Error.Stream_Too_Short
 			}
 		}
-		return XZ_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	if r.has_uncompressed && r.block_out != r.uncompressed {
-		return XZ_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	for pos := u64(r.header_size) + compressed; pos % 4 != 0; pos += 1 {
 		pad: [1]u8

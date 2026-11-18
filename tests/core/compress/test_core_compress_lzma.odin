@@ -250,18 +250,18 @@ lzma_limits :: proc(t: ^testing.T) {
 	defer delete(output)
 
 	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_SDK, max_output_size = len(inputs.text) - 1), compress.General_Error.Output_Too_Short)
-	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_SDK, len(inputs.text) + 1), compress.LZMA_Error.Size_Mismatch)
+	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_SDK, len(inputs.text) + 1), compress.General_Error.Size_Mismatch)
 	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, max_output_size = len(inputs.repeat) - 1), compress.General_Error.Output_Too_Short)
 	testing.expect(t, len(output) <= len(inputs.repeat) - 1)
 	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, len(inputs.repeat), len(inputs.repeat) - 1), compress.General_Error.Output_Too_Short)
 	testing.expect(t, len(output) <= len(inputs.repeat) - 1)
-	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, len(inputs.repeat) + 1), compress.LZMA_Error.Unexpected_End_Marker)
-	testing.expect(t, lzma.decompress(&output, LZMA_VECTOR_XZ, len(inputs.repeat) - 1) != nil)
+	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, len(inputs.repeat) + 1), compress.General_Error.Size_Mismatch)
+	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, len(inputs.repeat) - 1), compress.General_Error.Size_Mismatch)
 	testing.expect_value(t, lzma.decompress(&output, LZMA_VECTOR_XZ, max_output_size = len(inputs.repeat)), nil)
 	testing.expect(t, bytes.equal(output[:], inputs.repeat))
 
 	testing.expect_value(t, lzma.decompress_lzma2(&output, LZMA_VECTOR_LZMA2, 64 << 10, max_output_size = len(inputs.mixed) - 1), compress.General_Error.Output_Too_Short)
-	testing.expect_value(t, lzma.decompress_lzma2(&output, LZMA_VECTOR_LZMA2, 64 << 10, len(inputs.mixed) + 1), compress.LZMA_Error.Size_Mismatch)
+	testing.expect_value(t, lzma.decompress_lzma2(&output, LZMA_VECTOR_LZMA2, 64 << 10, len(inputs.mixed) + 1), compress.General_Error.Size_Mismatch)
 	testing.expect_value(t, lzma.decompress_lzma2(&output, LZMA_VECTOR_LZMA2, 64 << 10, len(inputs.mixed)), nil)
 	testing.expect(t, bytes.equal(output[:], inputs.mixed))
 

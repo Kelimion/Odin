@@ -47,6 +47,9 @@ inflate_gzip_from_context :: proc(z: ^compress.Context, expected_output_size := 
 		start = len(output)
 		magic, magic_err := compress.peek_data(z, Gzip_Magic)
 		if magic_err != nil || magic != .GZIP {
+			if expected >= 0 && start != expected {
+				return General_Error.Size_Mismatch
+			}
 			return nil
 		}
 	}

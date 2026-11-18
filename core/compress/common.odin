@@ -138,6 +138,7 @@ General_Error :: enum {
 	File_Too_Short,
 	Stream_Too_Short,
 	Output_Too_Short,
+	Size_Mismatch,
 	Unknown_Compression_Method,
 	Checksum_Failed,
 	Incompatible_Options,
@@ -212,8 +213,6 @@ LZMA_Error :: enum {
 	Invalid_Header,
 	Corrupt_Range_Coder,
 	Invalid_Distance,
-	Unexpected_End_Marker,
-	Size_Mismatch,
 	Invalid_Chunk,
 	Input_Too_Large,
 }
@@ -233,7 +232,6 @@ PPMd_Error :: enum {
 	None = 0,
 	Invalid_Properties,
 	Corrupt_Data,
-	Unexpected_End_Marker,
 	Unsupported_Restore_Method,
 }
 
@@ -252,7 +250,6 @@ XZ_Error :: enum {
 	Invalid_Filter_Chain,
 	Invalid_Block_Header,
 	Invalid_Padding,
-	Size_Mismatch,
 	Block_Checksum_Failed,
 	Invalid_Index,
 	Index_Mismatch,

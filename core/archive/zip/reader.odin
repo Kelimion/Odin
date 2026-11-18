@@ -653,11 +653,6 @@ _expected_size :: #force_inline proc "contextless" (size: i64) -> int {
 }
 
 @(private)
-_declared_limit :: #force_inline proc "contextless" (r: ^Reader, rec: ^Record) -> bool {
-	return rec.size <= i64(max(int)) && (r.options.max_output_size == 0 || i64(r.options.max_output_size) >= rec.size)
-}
-
-@(private)
 _extract :: proc(r: ^Reader, index: int, data_offset: i64, w: io.Writer, password: string) -> (err: Error) {
 	rec := &r.records[index]
 	header, _, extra := _central(r, index)
@@ -729,7 +724,7 @@ _extract_payload :: proc(r: ^Reader, index: int, data_offset: i64, w: io.Writer,
 			decode_err = legacy.explode_to_writer(out, &ctx, _implode_options(flags), expected, options, r.allocator)
 		}
 		if decode_err != nil {
-			if cw.over || (_declared_limit(r, rec) && decode_err == compress.General_Error.Output_Too_Short) {
+			if cw.over || decode_err == compress.General_Error.Size_Mismatch {
 				return Zip_Error.Size_Mismatch
 			}
 			return decode_err
@@ -939,7 +934,6 @@ _member_init :: proc(m: ^Member, r: ^Reader, index: int, data_offset: i64, passw
 	method, section, check_crc := _member_payload(r, rec, header, extra, data_offset, password, &m.cipher) or_return
 	m.section  = section
 	m.size     = rec.size
-	m.declared = _declared_limit(r, rec)
 	if check_crc {
 		m.expected = u32(header.crc32)
 	}
@@ -1092,7 +1086,7 @@ _member_read :: proc(m: ^Member, p: []u8) -> (n: int, err: Error) {
 			if io_err, is_io := codec_err.(io.Error); is_io && io_err == .EOF {
 				return 0, _member_finish(m)
 			}
-			if m.declared && codec_err == compress.General_Error.Output_Too_Short {
+			if codec_err == compress.General_Error.Size_Mismatch {
 				m.err = _cipher_error(&m.section, Zip_Error.Size_Mismatch)
 				return 0, m.err
 			}

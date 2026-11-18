@@ -53,7 +53,7 @@ out_grow :: proc(z: ^compress.Context, at, start, limit, need: int) -> (o: Out, 
 @(private)
 out_literal :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit: int, value: u8) -> (err: Error) #no_bounds_check {
 	if o.at - start >= limit {
-		return General_Error.Output_Too_Short
+		return General_Error.Size_Mismatch
 	}
 	if o.at == o.capacity {
 		o^, err = out_grow(z, o.at, start, limit, o.at - start + 1)
@@ -70,7 +70,7 @@ out_literal :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit: i
 out_bytes :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit: int, data: []u8) -> (err: Error) #no_bounds_check {
 	at := o.at
 	if at - start + len(data) > limit {
-		return General_Error.Output_Too_Short
+		return General_Error.Size_Mismatch
 	}
 	if at + len(data) > o.capacity {
 		o^, err = out_grow(z, at, start, limit, at - start + len(data))
@@ -87,7 +87,7 @@ out_bytes :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit: int
 out_match :: #force_inline proc(z: ^compress.Context, o: ^Out, start, limit, distance, length: int) -> (err: Error) #no_bounds_check {
 	at := o.at
 	if at - start + length > limit {
-		return General_Error.Output_Too_Short
+		return General_Error.Size_Mismatch
 	}
 	if at + length > o.capacity {
 		o^, err = out_grow(z, at, start, limit, at - start + length)

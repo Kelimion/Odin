@@ -11,7 +11,7 @@ import "core:time"
 LZ4_LIMITS_SIZE :: 1 << 20
 
 @(test)
-lz4_expected_size_is_a_limit :: proc(t: ^testing.T) {
+lz4_expected_size_is_exact :: proc(t: ^testing.T) {
 	data := make([]byte, LZ4_LIMITS_SIZE)
 	defer delete(data)
 	packed: [dynamic]byte
@@ -34,15 +34,15 @@ lz4_expected_size_is_a_limit :: proc(t: ^testing.T) {
 				testing.expectf(t, len(output) == len(data), "%v: %v bytes", kind, len(output))
 				testing.expectf(t, cap(output) == len(data), "%v: capacity %v for an exact size", kind, cap(output))
 			} else {
-				testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v: %v", kind, err)
-				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a limit of %v", kind, cap(output), expected)
+				testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v: %v", kind, err)
+				testing.expectf(t, cap(output) <= expected, "%v: capacity %v for a declared %v", kind, cap(output), expected)
 			}
 		}
 	}
 
 	output: [dynamic]byte
 	defer delete(output)
-	testing.expect_value(t, lz4.decompress_frame(&output, LZ4_VECTOR_LEGACY, 10), compress.Error(compress.General_Error.Output_Too_Short))
+	testing.expect_value(t, lz4.decompress_frame(&output, LZ4_VECTOR_LEGACY, 10), compress.Error(compress.General_Error.Size_Mismatch))
 	testing.expectf(t, cap(output) <= 10, "legacy: capacity %v", cap(output))
 }
 

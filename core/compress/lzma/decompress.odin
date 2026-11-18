@@ -18,6 +18,9 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 	if z.output == nil || max_output_size < 0 {
 		return General_Error.Incompatible_Options
 	}
+	if expected_output_size > max_output_size {
+		return General_Error.Output_Too_Short
+	}
 	header: [HEADER_SIZE]u8
 	if compress.read_slice(z, header[:]) != nil {
 		return General_Error.Stream_Too_Short
@@ -30,20 +33,17 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 
 	declared := -1
 	if size != UNKNOWN_SIZE {
+		if expected_output_size >= 0 && u64(expected_output_size) != size {
+			return General_Error.Size_Mismatch
+		}
 		if size > u64(max_output_size) {
 			return General_Error.Output_Too_Short
 		}
 		declared = int(size)
-		if expected_output_size >= 0 && expected_output_size != declared {
-			return LZMA_Error.Size_Mismatch
-		}
 	} else if expected_output_size >= 0 {
-		if expected_output_size > max_output_size {
-			return General_Error.Output_Too_Short
-		}
 		declared = expected_output_size
 	}
-	return decompress_lzma(z, props, declared, size != UNKNOWN_SIZE, max_output_size)
+	return decompress_lzma(z, props, declared, max_output_size)
 }
 
 decompress_raw_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, props: Properties, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
@@ -64,7 +64,7 @@ decompress_raw_from_context :: proc(z: ^compress.Context, props: Properties, exp
 	if expected > max_output_size {
 		return General_Error.Output_Too_Short
 	}
-	return decompress_lzma(z, props, expected, false, max_output_size)
+	return decompress_lzma(z, props, expected, max_output_size)
 }
 
 decompress_lzma2_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, dict_size: u32, expected_output_size := -1, max_output_size := compress.COMPRESS_OUTPUT_ALLOCATE_MAX, allocator := context.allocator) -> (err: Error) {
@@ -188,7 +188,7 @@ LZMA2_State :: struct {
 }
 
 @(private)
-decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, from_format: bool, max_output_size: int) -> (err: Error) {
+decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, max_output_size: int) -> (err: Error) {
 	d: Decoder
 	o := output_begin(z, size, max_output_size)
 	defer output_end(z, &o)
@@ -201,24 +201,21 @@ decompress_lzma :: proc(z: ^compress.Context, props: Properties, size: int, from
 	target := size if size >= 0 else o.end
 	packed := -1
 	eos    := decode_segment(&d, z, &o, target, &packed) or_return
-	return lzma_finish(&d, z, &o, size, eos, from_format)
+	return lzma_finish(&d, z, &o, size, eos)
 }
 
 @(private)
-lzma_finish :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, size: int, eos, from_format: bool) -> (err: Error) {
+lzma_finish :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, size: int, eos: bool) -> (err: Error) {
 	if eos {
 		if d.code != 0 {
 			return LZMA_Error.Corrupt_Range_Coder
 		}
 		if size >= 0 && o.base + o.written != size {
-			return LZMA_Error.Unexpected_End_Marker
+			return General_Error.Size_Mismatch
 		}
 		return nil
 	}
-	overflow: Error = General_Error.Output_Too_Short
-	if from_format {
-		overflow = LZMA_Error.Size_Mismatch
-	}
+	overflow := Error(General_Error.Size_Mismatch) if size >= 0 else Error(General_Error.Output_Too_Short)
 	if d.remain != 0 {
 		return overflow
 	}
@@ -233,7 +230,7 @@ lzma2_run :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, size: int) -> (
 	s := LZMA2_State{need_init = LZMA2_CONTROL_RESET_DICT}
 	lzma2_fill(d, z, o, &s, size) or_return
 	if !s.done {
-		return General_Error.Output_Too_Short
+		return General_Error.Size_Mismatch if size >= 0 else General_Error.Output_Too_Short
 	}
 	return nil
 }
@@ -241,7 +238,7 @@ lzma2_run :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, size: int) -> (
 @(private)
 lzma2_fill :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, s: ^LZMA2_State, size: int) -> (err: Error) {
 	target   := size if size >= 0 else o.end
-	overflow := Error(General_Error.Output_Too_Short)
+	overflow := Error(General_Error.Size_Mismatch) if size >= 0 else Error(General_Error.Output_Too_Short)
 	for !s.done {
 		switch s.chunk {
 		case .Copy:
@@ -279,7 +276,7 @@ lzma2_fill :: proc(d: ^Decoder, z: ^compress.Context, o: ^Output, s: ^LZMA2_Stat
 			d.consumed += 1
 			if control == 0 {
 				if size >= 0 && o.base + o.written != size {
-					return LZMA_Error.Size_Mismatch
+					return General_Error.Size_Mismatch
 				}
 				s.done = true
 				break

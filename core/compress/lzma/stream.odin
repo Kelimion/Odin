@@ -114,7 +114,7 @@ writer_write :: proc(lw: ^Writer, p: []u8) -> (n: int, err: Error) {
 	}
 	defer lw.err = err
 	if lw.input_size >= 0 && i64(len(p)) > lw.input_size - lw.total_in {
-		return 0, LZMA_Error.Size_Mismatch
+		return 0, General_Error.Size_Mismatch
 	}
 	mf := &lw.state.encoder.mf
 	for n < len(p) {
@@ -142,7 +142,7 @@ writer_finish :: proc(lw: ^Writer) -> (err: Error) {
 	}
 	defer lw.err = err
 	if lw.input_size >= 0 && lw.total_in != lw.input_size {
-		return LZMA_Error.Size_Mismatch
+		return General_Error.Size_Mismatch
 	}
 	e := &lw.state.encoder
 	if lw.kind == .LZMA2 {
@@ -202,6 +202,9 @@ stream_init :: proc(r: ^Reader, z: ^compress.Context, kind: Stream_Kind, props: 
 
 	size  := compress.declared_size(expected_output_size)
 	props := props
+	if options.max_output_size > 0 && size > options.max_output_size {
+		return General_Error.Output_Too_Short
+	}
 	switch kind {
 	case .Alone:
 		header: [HEADER_SIZE]u8
@@ -215,14 +218,13 @@ stream_init :: proc(r: ^Reader, z: ^compress.Context, kind: Stream_Kind, props: 
 			declared |= u64(header[PROPERTIES_SIZE + i]) << (8 * uint(i))
 		}
 		if declared != UNKNOWN_SIZE {
+			if size >= 0 && u64(size) != declared {
+				return General_Error.Size_Mismatch
+			}
 			if declared > u64(max(int)) {
 				return General_Error.Output_Too_Short
 			}
-			if size >= 0 && size != int(declared) {
-				return LZMA_Error.Size_Mismatch
-			}
-			size          = int(declared)
-			r.from_format = true
+			size = int(declared)
 		}
 	case .Raw:
 		if !valid_properties(props) {
@@ -306,7 +308,7 @@ stream_fill :: proc(r: ^Reader) -> (err: Error) {
 		lzma2_fill(&r.decoder, r.z, o, &r.lzma2, r.size) or_return
 		r.done = r.lzma2.done
 		if !r.done && (o.written < o.limit || (o.base + o.written == out_pos && r.decoder.consumed == consumed)) {
-			return General_Error.Output_Too_Short
+			return General_Error.Size_Mismatch if r.size >= 0 else General_Error.Output_Too_Short
 		}
 	case .Alone, .Raw:
 		target := r.size if r.size >= 0 else o.end
@@ -314,12 +316,12 @@ stream_fill :: proc(r: ^Reader) -> (err: Error) {
 		eos    := decode_segment(&r.decoder, r.z, o, target, &packed) or_return
 		if !eos && o.base + o.written < target && o.written >= o.limit {
 			if o.base + o.written == out_pos && r.decoder.consumed == consumed {
-				return General_Error.Output_Too_Short
+				return General_Error.Size_Mismatch if r.size >= 0 else General_Error.Output_Too_Short
 			}
 			return nil
 		}
 		r.done = true
-		return lzma_finish(&r.decoder, r.z, o, r.size, eos, r.from_format)
+		return lzma_finish(&r.decoder, r.z, o, r.size, eos)
 	}
 	return nil
 }

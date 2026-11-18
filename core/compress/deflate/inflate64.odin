@@ -10,6 +10,9 @@ inflate64_raw_from_context :: proc(z: ^compress.Context, expected_output_size :=
 	p: Inflate_Progress
 	inflate_progress_init(&p, z, expected_output_size, options) or_return
 	output := inflate_to_buffer(z, expected_output_size, &p, D64 = true) or_return
+	if expected := compress.declared_size(expected_output_size); expected >= 0 && len(output) != expected {
+		return General_Error.Size_Mismatch
+	}
 	return inflate_progress_step(&p, p.bytes_in, i64(len(output)))
 }
 

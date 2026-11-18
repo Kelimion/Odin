@@ -15,24 +15,25 @@ decompress_from_bytes :: proc(output: ^[dynamic]u8, input: []u8, flags := Decode
 	if output == nil || max_output_size < 0 {
 		return General_Error.Incompatible_Options
 	}
-	if expected_output_size > max_output_size {
+	expected := compress.declared_size(expected_output_size)
+	if expected > max_output_size {
 		return General_Error.Output_Too_Short
 	}
 	d := Decoder{
 		input           = input,
 		output          = output,
 		flags           = flags,
-		max_output_size = max_output_size,
+		max_output_size = expected if expected >= 0 else max_output_size,
 	}
 	lzma.lzma2_decoder_init(&d.lzma2, allocator)
 	defer lzma.lzma2_decoder_destroy(&d.lzma2)
 	clear(output)
-	if expected_output_size > 0 {
-		reserve(output, min(expected_output_size, compress.COMPRESS_INITIAL_RESERVATION))
+	if expected > 0 {
+		reserve(output, min(expected, compress.COMPRESS_INITIAL_RESERVATION))
 	}
 	err = _decode(&d)
-	if err == nil && expected_output_size >= 0 && len(output^) != expected_output_size {
-		err = XZ_Error.Size_Mismatch
+	if expected >= 0 && (err == General_Error.Output_Too_Short || (err == nil && len(output^) != expected)) {
+		err = General_Error.Size_Mismatch
 	}
 	return
 }
@@ -266,16 +267,13 @@ _decode_block :: proc(d: ^Decoder) -> (unpadded, uncompressed_size: u64, err: Er
 	}
 	consumed, lzma_err := lzma.decompress_lzma2_append(&d.lzma2, d.output, data, dict_size, expected, d.max_output_size)
 	if lzma_err != nil {
-		if lzma_err == compress.LZMA_Error.Size_Mismatch || (expected >= 0 && lzma_err == General_Error.Output_Too_Short) {
-			return 0, 0, XZ_Error.Size_Mismatch
-		}
-		if has_compressed && lzma_err == General_Error.Stream_Too_Short {
-			return 0, 0, XZ_Error.Size_Mismatch
+		if (expected >= 0 && lzma_err == General_Error.Output_Too_Short) || (has_compressed && lzma_err == General_Error.Stream_Too_Short) {
+			return 0, 0, General_Error.Size_Mismatch
 		}
 		return 0, 0, lzma_err
 	}
 	if has_compressed && u64(consumed) != compressed {
-		return 0, 0, XZ_Error.Size_Mismatch
+		return 0, 0, General_Error.Size_Mismatch
 	}
 	d.pos = data_start + consumed
 

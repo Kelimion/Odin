@@ -2020,7 +2020,7 @@ _node_read :: proc(node: ^Node, p: []u8) -> (n: int, err: Error) {
 	}
 	if codec_err != nil {
 		switch {
-		case codec_err == compress.General_Error.Output_Too_Short:
+		case codec_err == compress.General_Error.Size_Mismatch:
 			err = SevenZ_Error.Size_Mismatch
 		case:
 			if io_err, is_io := codec_err.(io.Error); is_io && io_err == .EOF {
@@ -2076,7 +2076,7 @@ _node_end :: proc(node: ^Node) -> (err: Error) {
 	case:
 		return nil
 	}
-	if n > 0 || end_err == compress.General_Error.Output_Too_Short {
+	if n > 0 || end_err == compress.General_Error.Size_Mismatch {
 		return SevenZ_Error.Size_Mismatch
 	}
 	if io_err, is_io := end_err.(io.Error); is_io && io_err == .EOF {

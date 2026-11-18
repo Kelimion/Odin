@@ -10,7 +10,7 @@ import "core:time"
 INFLATE_TEST_SIZE :: 1 << 20
 
 @(test)
-inflate_expected_size_is_a_limit :: proc(t: ^testing.T) {
+inflate_expected_size_is_exact :: proc(t: ^testing.T) {
 	data := make([]byte, INFLATE_TEST_SIZE)
 	defer delete(data)
 
@@ -38,8 +38,8 @@ inflate_expected_size_is_a_limit :: proc(t: ^testing.T) {
 						testing.expectf(t, cap(output) == len(data), "%v %v: capacity %v for an exact size", format, kind, cap(output))
 					}
 				} else {
-					testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v %v: %v", format, kind, err)
-					testing.expectf(t, cap(output) <= expected, "%v %v: capacity %v for a limit of %v", format, kind, cap(output), expected)
+					testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v %v: %v", format, kind, err)
+					testing.expectf(t, cap(output) <= expected, "%v %v: capacity %v for a declared %v", format, kind, cap(output), expected)
 				}
 			}
 		}
@@ -156,7 +156,7 @@ inflate_stored_block_limit :: proc(t: ^testing.T) {
 		err := deflate.inflate_raw(&ctx, 10)
 		compress.destroy_context(&ctx)
 		sinks_check(t, "stored limit", .Raw, kind, packed[:], 10)
-		testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v: %v", kind, err)
+		testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v: %v", kind, err)
 		testing.expectf(t, cap(output) <= 10, "%v: capacity %v", kind, cap(output))
 	}
 }

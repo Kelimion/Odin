@@ -15,6 +15,9 @@ inflate_raw_from_context :: proc(z: ^compress.Context, expected_output_size := -
 	p: Inflate_Progress
 	inflate_progress_init(&p, z, expected_output_size, options) or_return
 	output := inflate_to_buffer(z, expected_output_size, &p, D64 = false) or_return
+	if expected := compress.declared_size(expected_output_size); expected >= 0 && len(output) != expected {
+		return General_Error.Size_Mismatch
+	}
 	return inflate_progress_step(&p, p.bytes_in, i64(len(output)))
 }
 
@@ -36,6 +39,9 @@ inflate_zlib_from_context :: proc(z: ^compress.Context, expected_output_size := 
 	p.bytes_in += size_of(u32be)
 	if digest != u32(adler) {
 		return General_Error.Checksum_Failed
+	}
+	if expected := compress.declared_size(expected_output_size); expected >= 0 && len(output) != expected {
+		return General_Error.Size_Mismatch
 	}
 	return inflate_progress_step(&p, p.bytes_in, i64(len(output)))
 }
@@ -1095,6 +1101,9 @@ inflate_to_buffer :: proc(z: ^compress.Context, expected_output_size: int, p: ^I
 	if err != nil && inflate_overrun(&d.s) {
 		err     = General_Error.Stream_Too_Short
 		written = min(written, d.s.checkpoint)
+	}
+	if err == General_Error.Output_Too_Short && expected >= 0 {
+		err = General_Error.Size_Mismatch
 	}
 	non_zero_resize(buffer, start + written)
 	z.bytes_written = i64(start + written)

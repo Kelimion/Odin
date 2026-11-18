@@ -380,12 +380,12 @@ ppmd_limits :: proc(t: ^testing.T) {
 	size   := len(inputs.text)
 
 	testing.expect_value(t, ppmd.decompress(&output, PPMD_VECTOR_7Z, PPMD_VECTOR_7Z_PROPS, size, {max_output_size = size - 1}), compress.General_Error.Output_Too_Short)
-	testing.expect(t, ppmd.decompress(&output, PPMD_VECTOR_7Z, PPMD_VECTOR_7Z_PROPS, size - 1) != nil)
+	testing.expect_value(t, ppmd.decompress(&output, PPMD_VECTOR_7Z, PPMD_VECTOR_7Z_PROPS, size - 1), compress.General_Error.Size_Mismatch)
 
 	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, options = {max_output_size = size - 1}), compress.General_Error.Output_Too_Short)
 	testing.expect(t, len(output) <= size - 1)
-	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, size + 1), compress.PPMd_Error.Unexpected_End_Marker)
-	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, size - 1), compress.PPMd_Error.Corrupt_Data)
+	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, size + 1), compress.General_Error.Size_Mismatch)
+	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, size - 1), compress.General_Error.Size_Mismatch)
 	testing.expect_value(t, ppmd.decompress(&output, stream, PPMD_VECTOR_ZIP5_PROPS, options = {max_output_size = size}), nil)
 	testing.expect(t, bytes.equal(output[:], inputs.text))
 

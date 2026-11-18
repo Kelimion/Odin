@@ -155,7 +155,7 @@ implode_test_handcrafted :: proc(t: ^testing.T) {
 			output: [dynamic]u8
 			defer delete(output)
 			err := pkzip_legacy.explode(&output, data, options, 10)
-			testing.expectf(t, err == compress.General_Error.Output_Too_Short, "%v (match too long): %v", options, err)
+			testing.expectf(t, err == compress.General_Error.Size_Mismatch, "%v (match too long): %v", options, err)
 			testing.expectf(t, len(output) <= 10, "%v (match too long): wrote %v bytes", options, len(output))
 		}
 	}
@@ -237,7 +237,7 @@ implode_test_output_limit :: proc(t: ^testing.T) {
 		output: [dynamic]u8
 		defer delete(output)
 		limit_err := pkzip_legacy.explode(&output, data, {}, limit)
-		testing.expectf(t, limit_err == compress.General_Error.Output_Too_Short, "limit %v: %v", limit, limit_err)
+		testing.expectf(t, limit_err == compress.General_Error.Size_Mismatch, "limit %v: %v", limit, limit_err)
 		testing.expectf(t, len(output) <= limit, "limit %v: wrote %v bytes", limit, len(output))
 	}
 

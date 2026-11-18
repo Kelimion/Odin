@@ -282,6 +282,7 @@ Inflate_Reader :: struct {
 	high_water:  int,
 	history:     int,
 	limit:       i64,
+	declared:    i64,
 	total:       i64,
 	member:      i64,
 	progress:    Inflate_Progress,
@@ -1046,6 +1047,7 @@ inflate_stream_init :: proc(r: ^Inflate_Reader, z: ^compress.Context, format: In
 	if options.max_output_size > 0 {
 		r.limit = i64(options.max_output_size)
 	}
+	r.declared = expected
 	if expected >= 0 {
 		if r.limit >= 0 && expected > r.limit {
 			return General_Error.Output_Exceeds_COMPRESS_OUTPUT_ALLOCATE_MAX if format == .Gzip else General_Error.Output_Too_Short
@@ -1149,6 +1151,9 @@ inflate_stream_fill :: proc(r: ^Inflate_Reader) -> (err: Error) {
 		err     = General_Error.Stream_Too_Short
 		written = min(written, r.decoder.s.checkpoint)
 	}
+	if err == General_Error.Output_Too_Short && r.declared >= 0 {
+		err = General_Error.Size_Mismatch
+	}
 	r.written          = written
 	r.total           += i64(written - from)
 	r.member          += i64(written - from)
@@ -1185,6 +1190,9 @@ inflate_stream_fill :: proc(r: ^Inflate_Reader) -> (err: Error) {
 		}
 		magic, magic_err := compress.peek_data(r.z, Gzip_Magic)
 		r.done = magic_err != nil || magic != .GZIP
+	}
+	if r.done && r.declared >= 0 && r.total != r.declared {
+		return General_Error.Size_Mismatch
 	}
 	return
 }

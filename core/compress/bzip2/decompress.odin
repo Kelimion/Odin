@@ -61,10 +61,10 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 	pending: [BZIP2_INTERLEAVE]BZip2_Pending = ---
 	d: BZip2_Decoder = ---
 
-	for streams := 0; ; streams += 1 {
+	stream_loop: for streams := 0; ; streams += 1 {
 		nblock_max, at_end := bzip2_stream_header(&br, streams) or_return
 		if at_end {
-			return nil
+			break stream_loop
 		}
 
 		combined: u32
@@ -84,7 +84,7 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 			if magic == END_MAGIC {
 				written, err = bzip2_flush(z.output, written, limit, tts[:], scratch[:], pending[:np], &combined)
 				if err != nil {
-					return
+					break stream_loop
 				}
 				if stored_crc != combined {
 					return BZip2_Error.Stream_Checksum_Failed
@@ -117,12 +117,12 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 			if randomised {
 				written, err = bzip2_flush(z.output, written, limit, tts[:], scratch[:], pending[:np], &combined)
 				if err != nil {
-					return
+					break stream_loop
 				}
 				start := written
 				written, err = bzip2_emit_block(z.output, written, limit, tts[np][:nblock], orig_ptr, true)
 				if err != nil {
-					return
+					break stream_loop
 				}
 				block_crc := ~bzip2_crc(0xffff_ffff, z.output[start:written])
 				if block_crc != stored_crc {
@@ -137,7 +137,7 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 			if np == BZIP2_INTERLEAVE {
 				written, err = bzip2_flush(z.output, written, limit, tts[:], scratch[:], pending[:np], &combined)
 				if err != nil {
-					return
+					break stream_loop
 				}
 				np = 0
 			}
@@ -145,12 +145,16 @@ decompress_from_context :: proc(z: ^compress.Context, expected_output_size := -1
 		if block_err != nil {
 			written, err = bzip2_flush(z.output, written, limit, tts[:], scratch[:], pending[:np], &combined)
 			if err != nil {
-				return
+				break stream_loop
 			}
 			return block_err
 		}
 		bzip2_stream_end(z, &br) or_return
 	}
+	if expected >= 0 && (err == General_Error.Output_Too_Short || (err == nil && written != expected)) {
+		return General_Error.Size_Mismatch
+	}
+	return
 }
 
 decompress_to_writer :: proc(w: io.Writer, z: ^compress.Context, expected_output_size := -1, options: compress.Options = {}, allocator := context.allocator) -> (err: Error) {
@@ -1011,6 +1015,9 @@ bzip2_stream_fill :: proc(r: ^Reader) -> (err: Error) {
 		switch r.state {
 		case .Done:
 			r.done = true
+			if r.total_out >= 0 && r.total != r.total_out {
+				return General_Error.Size_Mismatch
+			}
 			return nil
 
 		case .Header:
@@ -1086,7 +1093,7 @@ bzip2_stream_fill :: proc(r: ^Reader) -> (err: Error) {
 				r.total += i64(r.written - start)
 				if !finished {
 					if r.limit >= 0 && r.total >= r.limit {
-						return General_Error.Output_Too_Short
+						return General_Error.Size_Mismatch if r.total_out >= 0 else General_Error.Output_Too_Short
 					}
 					return nil
 				}

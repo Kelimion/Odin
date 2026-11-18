@@ -46,7 +46,6 @@ Reader :: struct {
 	keep:        int,
 	size:        int,
 	kind:        Stream_Kind,
-	from_format: bool,
 	done:        bool,
 	owns_window: bool,
 	options:     compress.Options,

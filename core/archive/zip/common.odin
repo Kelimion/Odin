@@ -383,7 +383,6 @@ Member :: struct {
 	cipher:    Cipher,
 	size:      i64,
 	produced:  i64,
-	declared:  bool,
 	crc:       u32,
 	expected:  Maybe(u32),
 	err:       Error,

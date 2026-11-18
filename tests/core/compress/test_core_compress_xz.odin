@@ -192,8 +192,8 @@ test_xz_limits :: proc(t: ^testing.T) {
 	testing.expect_value(t, xz.decompress(&out, data, {}, -1, 80_000), nil)
 	testing.expect_value(t, len(out), 80_000)
 	testing.expect_value(t, xz.decompress(&out, data, {}, -1, 79_999), compress.Error(compress.General_Error.Output_Too_Short))
-	testing.expect_value(t, xz.decompress(&out, data, {}, 80_001), compress.Error(compress.XZ_Error.Size_Mismatch))
-	testing.expect_value(t, xz.decompress(&out, data, {}, 79_999), compress.Error(compress.XZ_Error.Size_Mismatch))
+	testing.expect_value(t, xz.decompress(&out, data, {}, 80_001), compress.Error(compress.General_Error.Size_Mismatch))
+	testing.expect_value(t, xz.decompress(&out, data, {}, 79_999), compress.Error(compress.General_Error.Size_Mismatch))
 
 	threads, threads_err := os.read_entire_file(xz_asset("text.threads.xz"), context.allocator)
 	if testing.expect_value(t, threads_err, nil) {
