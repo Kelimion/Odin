@@ -1,3 +1,10 @@
+// An implementation of the .xz file format
+//
+// Reads and writes `.xz` files, also stored in zip as method 95: LZMA2 behind up to three filters
+// (Delta and the branch converters from `core:compress/filters`), with an optional CRC32, CRC64 or
+// SHA-256 check. Concatenated streams and stream padding decode as one, and checks of other types
+// are skipped unverified. `read_index`, `find_block` and `decompress_block` seek through a file's
+// index and decode single blocks.
 package compress_xz
 
 import "base:runtime"
@@ -6,6 +13,22 @@ import "core:compress/filters"
 import "core:compress/lzma"
 import "core:crypto/sha2"
 import "core:io"
+
+/*
+	Copyright 2026 Jeroen van Rijn <nom@duclavier.com>.
+	Made available under Odin's license.
+
+	List of contributors:
+		Jeroen van Rijn: Initial implementation.
+
+	Format: The .xz File Format 1.2.1 (2024-04-08), by Lasse Collin and Igor Pavlov,
+	        placed in the public domain: https://tukaani.org/xz/xz-file-format.txt
+
+	The LZMA SDK's C/XzDec.c and C/XzEnc.c, by Igor Pavlov, served as references:
+		https://www.7-zip.org/sdk.html
+
+	Many thanks to Lasse Collin and Igor Pavlov for the .xz format.
+*/
 
 Error         :: compress.Error
 General_Error :: compress.General_Error
