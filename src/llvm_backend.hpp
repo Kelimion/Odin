@@ -458,6 +458,7 @@ struct lbProcedure {
 	PtrMap<Ast *, lbValue> selector_values;
 	PtrMap<Ast *, lbAddr>  selector_addr;
 	PtrMap<LLVMValueRef, lbTupleFix> tuple_fix_map;
+	PtrMap<Ast *, lbAddr>  range_snapshot_bases; // the copies of bases the body of a loop over a snapshot writes through
 
 	Array<lbValue> asan_stack_locals;
 

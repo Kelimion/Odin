@@ -5697,14 +5697,23 @@ gb_internal void escape_graph_place_calls(CheckedCall *calls, isize count) {
 // the columns from its header for each field of an element. When the body can write nothing else which could,
 // the backend reads the header once before the loop instead, once it checks that the memory the body writes is apart from it.
 // The body may only call builtins which write no memory, and may only write the elements, its own locals, and outer locals and globals.
+// It may also write through a base read from outside the body (see `escape_range_snapshot_target`), whose bytes are checked too.
 // Any other write, or any other call, may change the array (e.g. through `append`).
+struct EscapeRangeTarget {
+	Ast *       base;
+	Entity *    root;
+	Array<Ast *> uses;
+};
+
 struct EscapeRangeSnapshot {
-	Scope *         body_scope;
-	Entity *        elem;         // the loop's value
-	Entity *        soa_elem;     // the loop's value when it is an #soa element, whose address holds the header's
-	bool            writes_elems; // through the loop's value
-	Array<i32>      columns;      // of the #soa array, those the body writes
-	Array<Entity *> outer;
+	Scope *                  body_scope;
+	Entity *                 elem;         // the loop's value
+	Entity *                 soa_elem;     // the loop's value when it is an #soa element, whose address holds the header's
+	bool                     bounds_off;   // within `#no_bounds_check`
+	bool                     writes_elems; // through the loop's value
+	Array<i32>               columns;      // of the #soa array, those the body writes
+	Array<Entity *>          outer;
+	Array<EscapeRangeTarget> targets;
 };
 
 gb_internal bool escape_range_snapshot_builtin(BuiltinProcId id) {
@@ -5923,7 +5932,158 @@ gb_internal EscapeSoaColumns escape_range_snapshot_soa_columns(EscapeRangeSnapsh
 	return c;
 }
 
-// Whether the body may store to `lhs`: an element, a local of its own, or an outer local or global, which is recorded
+// The variable a base is read from: one from outside the body, its fields, and what they point to, with nothing indexed or called
+gb_internal Entity *escape_range_snapshot_fixed(EscapeRangeSnapshot *s, Ast *x) {
+	x = unparen_expr(x);
+	switch (x->kind) {
+	case Ast_Ident: {
+		Entity *e = entity_of_node(x);
+		if (e == nullptr) {
+			return nullptr;
+		}
+		if (e->kind != Entity_Variable) {
+			return nullptr;
+		}
+		if (e == s->elem) {
+			return nullptr;
+		}
+		if (escape_is_reference(e)) {
+			return nullptr;
+		}
+		if (escape_is_using_field(e)) {
+			return nullptr;
+		}
+		for (Scope *scope = e->scope; scope != nullptr; scope = scope->parent) {
+			if (scope == s->body_scope) {
+				return nullptr;
+			}
+		}
+		return e;
+	}
+	case Ast_SelectorExpr: {
+		Entity *global = escape_package_selector(x);
+		if (global != nullptr) {
+			return global->kind == Entity_Variable ? global : nullptr;
+		}
+		if (x->SelectorExpr.swizzle_count > 0) {
+			return nullptr;
+		}
+		if (x->SelectorExpr.is_bit_field) {
+			return nullptr;
+		}
+		EscapePath field = {};
+		if (!escape_selector_path(x, &field)) {
+			return nullptr;
+		}
+		return escape_range_snapshot_fixed(s, x->SelectorExpr.expr);
+	}
+	case Ast_DerefExpr:
+		if (!is_type_pointer(x->DerefExpr.expr->tav.type)) {
+			return nullptr;
+		}
+		return escape_range_snapshot_fixed(s, x->DerefExpr.expr);
+	}
+	return nullptr;
+}
+
+gb_internal bool escape_range_snapshot_same_base(Ast *a, Ast *b) {
+	a = unparen_expr(a);
+	b = unparen_expr(b);
+	if (a->kind != b->kind) {
+		return false;
+	}
+	switch (a->kind) {
+	case Ast_Ident:
+		return entity_of_node(a) == entity_of_node(b);
+	case Ast_SelectorExpr:
+		if (entity_of_node(a->SelectorExpr.selector) != entity_of_node(b->SelectorExpr.selector)) {
+			return false;
+		}
+		if (escape_package_selector(a) != nullptr) {
+			return true;
+		}
+		return escape_range_snapshot_same_base(a->SelectorExpr.expr, b->SelectorExpr.expr);
+	case Ast_DerefExpr:
+		return escape_range_snapshot_same_base(a->DerefExpr.expr, b->DerefExpr.expr);
+	}
+	return false;
+}
+
+// Whether the body may store to `lhs` through a base it reads before the loop, which bounds what the store writes:
+// an element of a slice, a [dynamic] array, or an #soa slice or dynamic array, or the memory a pointer points to.
+// Any index after the base must be bounds checked: without the check a store could land anywhere, the header included.
+gb_internal bool escape_range_snapshot_target(EscapeRangeSnapshot *s, Ast *lhs) {
+	bool off  = s->bounds_off;
+	Ast *x    = lhs;
+	Ast *base = nullptr;
+	while (base == nullptr) {
+		x = unparen_expr(x);
+		if (x->state_flags & StateFlag_no_bounds_check) {
+			off = true;
+		}
+		switch (x->kind) {
+		case Ast_SelectorExpr: {
+			if (is_type_pointer(x->SelectorExpr.expr->tav.type)) {
+				base = x->SelectorExpr.expr;
+				break;
+			}
+			EscapePath field = {};
+			if (!escape_selector_path(x, &field)) {
+				return false;
+			}
+			x = x->SelectorExpr.expr;
+			break;
+		}
+		case Ast_IndexExpr: {
+			Type *bt = base_type(x->IndexExpr.expr->tav.type);
+			bool constant = x->IndexExpr.index->tav.mode == Addressing_Constant;
+			if (escape_is_inline_array(bt) || (is_type_soa_struct(bt) && soa_has_inline_fields(bt))) {
+				if (off && !constant) {
+					return false;
+				}
+				x = x->IndexExpr.expr;
+				break;
+			}
+			if (off) {
+				return false;
+			}
+			bool elems   = bt->kind == Type_Slice || bt->kind == Type_DynamicArray || is_type_soa_struct(bt);
+			bool pointee = bt->kind == Type_Pointer && escape_is_inline_array(base_type(type_deref(bt)));
+			if (!elems && !pointee) {
+				return false;
+			}
+			base = x->IndexExpr.expr;
+			break;
+		}
+		case Ast_DerefExpr:
+			if (!is_type_pointer(x->DerefExpr.expr->tav.type)) {
+				return false;
+			}
+			base = x->DerefExpr.expr;
+			break;
+		default:
+			return false;
+		}
+	}
+
+	Entity *root = escape_range_snapshot_fixed(s, base);
+	if (root == nullptr) {
+		return false;
+	}
+	base = unparen_expr(base);
+	for (EscapeRangeTarget &t : s->targets) {
+		if (escape_range_snapshot_same_base(t.base, base)) {
+			array_add(&t.uses, base);
+			return true;
+		}
+	}
+	EscapeRangeTarget t = {base, root, array_make<Ast *>(heap_allocator())};
+	array_add(&t.uses, base);
+	array_add(&s->targets, t);
+	return true;
+}
+
+// Whether the body may store to `lhs`: an element, a local of its own, an outer local or global, or through a target, which is recorded
 gb_internal bool escape_range_snapshot_write(EscapeRangeSnapshot *s, Ast *lhs) {
 	// NOTE(bill): a swizzle or a bit field is within what it is selected from
 	lhs = unparen_expr(lhs);
@@ -5940,8 +6100,11 @@ gb_internal bool escape_range_snapshot_write(EscapeRangeSnapshot *s, Ast *lhs) {
 	EscapeLocation loc = {};
 	escape_outer_location(lhs, &loc);
 	Entity *e = loc.root;
-	if (e == nullptr || e->kind != Entity_Variable || escape_path_deref_index(loc.path) != loc.path.count) {
+	if (e == nullptr || e->kind != Entity_Variable) {
 		return false;
+	}
+	if (escape_path_deref_index(loc.path) != loc.path.count) {
+		return escape_range_snapshot_target(s, lhs);
 	}
 	if (e == s->elem) {
 		s->writes_elems = true;
@@ -5980,10 +6143,25 @@ gb_internal bool escape_range_snapshot_stmts(EscapeRangeSnapshot *s, Slice<Ast *
 	return true;
 }
 
+// Whether bounds checks are off within the statement `node`, as the backend has it
+gb_internal bool escape_bounds_off_within(Ast *node, bool off) {
+	if (node->state_flags & StateFlag_bounds_check) {
+		return false;
+	}
+	if (node->state_flags & StateFlag_no_bounds_check) {
+		return true;
+	}
+	return off;
+}
+
 gb_internal bool escape_range_snapshot_stmt(EscapeRangeSnapshot *s, Ast *stmt) {
 	if (stmt == nullptr) {
 		return true;
 	}
+	bool bounds_off = s->bounds_off;
+	defer (s->bounds_off = bounds_off);
+	s->bounds_off = escape_bounds_off_within(stmt, s->bounds_off);
+
 	switch (stmt->kind) {
 	case Ast_EmptyStmt:
 	case Ast_BranchStmt:
@@ -6046,7 +6224,14 @@ gb_internal bool escape_range_snapshot_stmt(EscapeRangeSnapshot *s, Ast *stmt) {
 	return false;
 }
 
-gb_internal void escape_range_snapshot(AstRangeStmt *rs) {
+gb_internal void escape_range_targets_free(Array<EscapeRangeTarget> *targets) {
+	for (EscapeRangeTarget &t : *targets) {
+		array_free(&t.uses);
+	}
+	array_free(targets);
+}
+
+gb_internal void escape_range_snapshot(AstRangeStmt *rs, bool bounds_off) {
 	Ast *expr = unparen_expr(rs->expr);
 	if (is_ast_range(expr) || expr->tav.mode == Addressing_Type || rs->body->kind != Ast_BlockStmt) {
 		return;
@@ -6067,71 +6252,87 @@ gb_internal void escape_range_snapshot(AstRangeStmt *rs) {
 	s.body_scope = rs->body->BlockStmt.scope;
 	s.elem       = val0 != nullptr ? entity_of_node(val0) : nullptr;
 	s.soa_elem   = is_soa ? s.elem : nullptr;
+	s.bounds_off = bounds_off;
 	s.columns    = array_make<i32>(heap_allocator());
 	s.outer      = array_make<Entity *>(heap_allocator());
+	s.targets    = array_make<EscapeRangeTarget>(heap_allocator());
 	defer (array_free(&s.columns));
 	defer (array_free(&s.outer));
+	defer (escape_range_targets_free(&s.targets));
 	if (!escape_range_snapshot_stmt(&s, rs->body)) {
 		return;
+	}
+	// NOTE(bill): a base read from a variable the body stores to would not be the one read before the loop
+	for (EscapeRangeTarget const &t : s.targets) {
+		if (escape_contains(s.outer, t.root)) {
+			return;
+		}
 	}
 
 	AstRangeSnapshot *snapshot = permanent_alloc_item<AstRangeSnapshot>();
 	snapshot->writes_elems = s.writes_elems;
 	snapshot->columns      = slice_clone_from_array(permanent_allocator(), s.columns);
 	snapshot->outer        = slice_clone_from_array(permanent_allocator(), s.outer);
+	snapshot->targets      = permanent_slice_make<AstRangeSnapshotTarget>(s.targets.count);
+	for_array(i, s.targets) {
+		snapshot->targets[i].base = s.targets[i].base;
+		snapshot->targets[i].uses = slice_clone_from_array(permanent_allocator(), s.targets[i].uses);
+	}
 	rs->snapshot = snapshot;
 }
 
 // The range loops of a body, wherever they are in it
-gb_internal void escape_range_snapshots_in(Ast *stmt) {
+gb_internal void escape_range_snapshots_in(Ast *stmt, bool bounds_off) {
 	if (stmt == nullptr) {
 		return;
 	}
+	bounds_off = escape_bounds_off_within(stmt, bounds_off);
 	switch (stmt->kind) {
 	case_ast_node(bs, BlockStmt, stmt);
 		for (Ast *s : bs->stmts) {
-			escape_range_snapshots_in(s);
+			escape_range_snapshots_in(s, bounds_off);
 		}
 	case_end;
 	case_ast_node(is, IfStmt, stmt);
-		escape_range_snapshots_in(is->body);
-		escape_range_snapshots_in(is->else_stmt);
+		escape_range_snapshots_in(is->body, bounds_off);
+		escape_range_snapshots_in(is->else_stmt, bounds_off);
 	case_end;
 	case_ast_node(ws, WhenStmt, stmt);
 		if (ws->is_cond_determined) {
-			escape_range_snapshots_in(ws->determined_cond ? ws->body : ws->else_stmt);
+			escape_range_snapshots_in(ws->determined_cond ? ws->body : ws->else_stmt, bounds_off);
 		}
 	case_end;
 	case_ast_node(fs, ForStmt, stmt);
-		escape_range_snapshots_in(fs->body);
+		escape_range_snapshots_in(fs->body, bounds_off);
 	case_end;
 	case_ast_node(rs, RangeStmt, stmt);
-		escape_range_snapshot(rs);
-		escape_range_snapshots_in(rs->body);
+		escape_range_snapshot(rs, bounds_off);
+		escape_range_snapshots_in(rs->body, bounds_off);
 	case_end;
 	case_ast_node(rs, UnrollRangeStmt, stmt);
-		escape_range_snapshots_in(rs->body);
+		escape_range_snapshots_in(rs->body, bounds_off);
 	case_end;
 	case_ast_node(ss, SwitchStmt, stmt);
-		escape_range_snapshots_in(ss->body);
+		escape_range_snapshots_in(ss->body, bounds_off);
 	case_end;
 	case_ast_node(ss, TypeSwitchStmt, stmt);
-		escape_range_snapshots_in(ss->body);
+		escape_range_snapshots_in(ss->body, bounds_off);
 	case_end;
 	case_ast_node(cc, CaseClause, stmt);
 		for (Ast *s : cc->stmts) {
-			escape_range_snapshots_in(s);
+			escape_range_snapshots_in(s, bounds_off);
 		}
 	case_end;
 	case_ast_node(ds, DeferStmt, stmt);
-		escape_range_snapshots_in(ds->stmt);
+		// NOTE(bill): a deferred statement has the bounds checks of where it runs, which may have them off
+		escape_range_snapshots_in(ds->stmt, true);
 	case_end;
 	}
 }
 
 gb_internal void escape_range_snapshots(ProcInfo **procs, isize count) {
 	for (isize k = 0; k < count; k++) {
-		escape_range_snapshots_in(procs[k]->body);
+		escape_range_snapshots_in(procs[k]->body, build_context.no_bounds_check);
 	}
 }
 

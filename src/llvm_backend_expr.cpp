@@ -4697,6 +4697,12 @@ gb_internal lbValue lb_build_expr(lbProcedure *p, Ast *expr) {
 		p->state_flags = out;
 	}
 
+	if (p->range_snapshot_bases.count != 0) {
+		lbAddr *copy = map_get(&p->range_snapshot_bases, expr);
+		if (copy != nullptr) {
+			return lb_addr_load(p, *copy);
+		}
+	}
 
 	// IMPORTANT NOTE(bill):
 	// Selector Call Expressions (foo->bar(...))
@@ -5277,6 +5283,13 @@ gb_internal lbAddr lb_build_array_swizzle_addr(lbProcedure *p, AstCallExpr *ce, 
 gb_internal lbAddr lb_build_addr_internal(lbProcedure *p, Ast *expr);
 gb_internal lbAddr lb_build_addr(lbProcedure *p, Ast *expr) {
 	expr = unparen_expr(expr);
+
+	if (p->range_snapshot_bases.count != 0) {
+		lbAddr *copy = map_get(&p->range_snapshot_bases, expr);
+		if (copy != nullptr) {
+			return *copy;
+		}
+	}
 
 	// IMPORTANT NOTE(bill):
 	// Selector Call Expressions (foo->bar(...))
