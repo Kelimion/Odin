@@ -1280,8 +1280,7 @@ struct lbRangeBytes {
 struct lbRangeBase {
 	Ast *  use;
 	lbAddr copy;
-	bool   had_prev; // the copy of an enclosing loop's snapshot, restored after this loop's
-	lbAddr prev;
+	bool   mapped; // false when an enclosing loop's snapshot already has a copy, which holds here too
 };
 
 // The bytes the loop over the snapshot reads once before it, and the bytes the body may write, which must all be apart,
@@ -1422,12 +1421,10 @@ gb_internal void lb_range_snapshot_begin(lbProcedure *p, lbRangeSnapshot *s, Ast
 	lb_start_block(p, fast);
 
 	for (lbRangeBase &b : s->bases) {
-		lbAddr *prev = map_get(&p->range_snapshot_bases, b.use);
-		b.had_prev = prev != nullptr;
-		if (b.had_prev) {
-			b.prev = *prev;
+		b.mapped = map_get(&p->range_snapshot_bases, b.use) == nullptr;
+		if (b.mapped) {
+			map_set(&p->range_snapshot_bases, b.use, b.copy);
 		}
-		map_set(&p->range_snapshot_bases, b.use, b.copy);
 	}
 }
 
@@ -1438,9 +1435,7 @@ gb_internal bool lb_range_snapshot_reload(lbProcedure *p, lbRangeSnapshot *s, Sc
 		return false;
 	}
 	for (lbRangeBase const &b : s->bases) {
-		if (b.had_prev) {
-			map_set(&p->range_snapshot_bases, b.use, b.prev);
-		} else {
+		if (b.mapped) {
 			map_remove(&p->range_snapshot_bases, b.use);
 		}
 	}
