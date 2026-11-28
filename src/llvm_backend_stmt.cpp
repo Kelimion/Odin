@@ -1271,15 +1271,36 @@ gb_internal void lb_build_range_tuple(lbProcedure *p, AstRangeStmt *rs, Scope *s
 	lb_build_range_stmt_body(p, rs, loop, done);
 }
 
-// The check that all the memory a range loop's body writes is apart from the bytes of the array's header it reads,
-// and the blocks of the loop over a snapshot of the header and of the usual loop it chooses between, see `escape_range_snapshots`
-struct lbRangeSnapshot {
-	lbValue  lo;
-	lbValue  hi;
-	lbValue  apart;  // nullptr while nothing is checked
-	lbBlock *reload; // the usual loop's, when something is checked
-	lbBlock *after;
+struct lbRangeBytes {
+	lbValue lo;
+	lbValue hi;
 };
+
+// A base the body writes through, and the copy of it the loop over the snapshot reads instead
+struct lbRangeBase {
+	Ast *  use;
+	lbAddr copy;
+	bool   mapped; // false when an enclosing loop's snapshot already has a copy, which holds here too
+};
+
+// The bytes the loop over the snapshot reads once before it, and the bytes the body may write, which must all be apart,
+// and the blocks of that loop and of the usual loop it chooses between, see `escape_range_snapshots`
+struct lbRangeSnapshot {
+	Array<lbRangeBytes> reads;   // the header, and the memory each base the body writes through is read from
+	Array<lbRangeBytes> writes;
+	LLVMValueRef        wrapped; // whether the end of some written bytes wrapped around, nullptr until one could
+	Array<lbRangeBase>  bases;
+	lbBlock *           reload;  // the usual loop's, when something is checked
+	lbBlock *           after;
+};
+
+gb_internal lbRangeSnapshot lb_range_snapshot_make(void) {
+	lbRangeSnapshot s = {};
+	s.reads  = array_make<lbRangeBytes>(temporary_allocator());
+	s.writes = array_make<lbRangeBytes>(temporary_allocator());
+	s.bases  = array_make<lbRangeBase>(temporary_allocator());
+	return s;
+}
 
 // A write to an element of a `#no_alias` parameter cannot overlap its header
 gb_internal bool lb_range_over_no_alias_param(AstRangeStmt *rs) {
@@ -1290,32 +1311,121 @@ gb_internal bool lb_range_over_no_alias_param(AstRangeStmt *rs) {
 	return lb_no_alias_data_pointers(e) != 0;
 }
 
-// Checks the `size` bytes at `ptr` are apart from the header
-gb_internal void lb_range_snapshot_check(lbProcedure *p, lbRangeSnapshot *s, lbValue ptr, lbValue size) {
+// The `size` bytes at `ptr`, which the loop over the snapshot reads once before it
+gb_internal void lb_range_snapshot_read(lbProcedure *p, lbRangeSnapshot *s, lbValue ptr, i64 size) {
 	lbValue lo = lb_emit_conv(p, ptr, t_uintptr);
-	lbValue hi = lb_emit_arith(p, Token_Add, lo, size, t_uintptr);
-	LLVMValueRef apart = LLVMBuildOr(p->builder, lb_emit_comp(p, Token_LtEq, hi, s->lo).value, lb_emit_comp(p, Token_LtEq, s->hi, lo).value, "");
-	if (s->apart.value != nullptr) {
-		apart = LLVMBuildAnd(p->builder, s->apart.value, apart, "");
-	}
-	s->apart = {apart, t_llvm_bool};
+	lbValue hi = lb_emit_arith(p, Token_Add, lo, lb_const_int(p->module, t_uintptr, size), t_uintptr);
+	array_add(&s->reads, lbRangeBytes{lo, hi});
 }
 
-// Checks the outer locals and globals the body writes too, then starts the loop over the snapshot when all is apart from the header,
-// branching to the usual loop otherwise
-gb_internal void lb_range_snapshot_begin(lbProcedure *p, lbRangeSnapshot *s, AstRangeSnapshot *snapshot) {
-	for (Entity *e : snapshot->outer) {
-		lbValue ptr = lb_addr_get_ptr(p, lb_build_addr_from_entity(p, e, nullptr));
-		lb_range_snapshot_check(p, s, ptr, lb_const_int(p->module, t_uintptr, type_size_of(e->type)));
+// The `count` elements of `elem_size` bytes at `ptr`, which the body may write.
+// Their end may wrap around for a made up count (e.g. `([^]T)(p)[:n]`), and then they count as overlapping all else.
+gb_internal void lb_range_snapshot_write(lbProcedure *p, lbRangeSnapshot *s, lbValue ptr, lbValue count, i64 elem_size) {
+	LLVMTypeRef  type   = lb_type(p->module, t_uintptr);
+	LLVMValueRef lo     = lb_emit_conv(p, ptr, t_uintptr).value;
+	LLVMValueRef mul[2] = {lb_emit_conv(p, count, t_uintptr).value, LLVMConstInt(type, cast(unsigned long long)elem_size, false)};
+	LLVMValueRef size   = lb_call_intrinsic(p, "llvm.umul.with.overflow", mul, 2, &type, 1);
+	LLVMValueRef add[2] = {lo, LLVMBuildExtractValue(p->builder, size, 0, "")};
+	LLVMValueRef hi     = lb_call_intrinsic(p, "llvm.uadd.with.overflow", add, 2, &type, 1);
+
+	LLVMValueRef wrapped = LLVMBuildOr(p->builder, LLVMBuildExtractValue(p->builder, size, 1, ""), LLVMBuildExtractValue(p->builder, hi, 1, ""), "");
+	if (s->wrapped != nullptr) {
+		wrapped = LLVMBuildOr(p->builder, s->wrapped, wrapped, "");
 	}
-	if (s->apart.value == nullptr) {
+	s->wrapped = wrapped;
+	array_add(&s->writes, lbRangeBytes{{lo, t_uintptr}, {LLVMBuildExtractValue(p->builder, hi, 0, ""), t_uintptr}});
+}
+
+// The bytes `x` is read from: its variable's, and the memory each pointer on the way to it points to
+gb_internal void lb_range_snapshot_read_base(lbProcedure *p, lbRangeSnapshot *s, Ast *x) {
+	x = unparen_expr(x);
+	i64 size = type_size_of(type_of_expr(x));
+	Ast *from = nullptr;
+	switch (x->kind) {
+	case Ast_SelectorExpr: {
+		Entity *pkg = entity_of_node(x->SelectorExpr.expr);
+		if (pkg == nullptr || pkg->kind != Entity_ImportName) {
+			from = x->SelectorExpr.expr;
+		}
+		break;
+	}
+	case Ast_DerefExpr:
+		from = x->DerefExpr.expr;
+		break;
+	}
+	if (from != nullptr) {
+		lb_range_snapshot_read_base(p, s, from);
+		if (!is_type_pointer(type_of_expr(from))) {
+			return; // within the bytes of `from`
+		}
+	}
+	lb_range_snapshot_read(p, s, lb_addr_get_ptr(p, lb_build_addr(p, x)), size);
+}
+
+// The bytes of a base the body writes through, and of what it is read from, and its copy for the loop over the snapshot
+gb_internal void lb_range_snapshot_target(lbProcedure *p, lbRangeSnapshot *s, AstRangeSnapshotTarget const &target) {
+	lb_range_snapshot_read_base(p, s, target.base);
+
+	Type * type = type_of_expr(target.base);
+	Type * bt   = base_type(type);
+	lbAddr copy = lb_add_local_generated(p, type, false);
+	lb_addr_store(p, copy, lb_build_expr(p, target.base));
+	lbValue value = lb_addr_load(p, copy);
+
+	lbValue one = lb_const_int(p->module, t_uintptr, 1);
+	if (bt->kind == Type_Pointer) {
+		lb_range_snapshot_write(p, s, value, one, type_size_of(bt->Pointer.elem));
+	} else if (is_type_soa_struct(bt)) {
+		lbValue len = lb_soa_struct_len(p, copy.addr);
+		for (isize i = 0; i < soa_field_count(bt); i++) {
+			lbValue column = lb_emit_struct_ev(p, value, cast(i32)i);
+			lb_range_snapshot_write(p, s, column, len, type_size_of(type_deref(column.type, true)));
+		}
+	} else {
+		Type *elem = bt->kind == Type_Slice ? bt->Slice.elem : bt->DynamicArray.elem;
+		lb_range_snapshot_write(p, s, lb_emit_struct_ev(p, value, 0), lb_emit_struct_ev(p, value, 1), type_size_of(elem));
+	}
+
+	for (Ast *use : target.uses) {
+		array_add(&s->bases, lbRangeBase{use, copy});
+	}
+}
+
+// Takes in the outer locals and globals the body writes, and the bases it writes through, then starts the loop over the snapshot
+// when every byte written is apart from every byte that loop reads once, branching to the usual loop otherwise
+gb_internal void lb_range_snapshot_begin(lbProcedure *p, lbRangeSnapshot *s, AstRangeSnapshot *snapshot) {
+	lbValue one = lb_const_int(p->module, t_uintptr, 1);
+	for (Entity *e : snapshot->outer) {
+		lb_range_snapshot_write(p, s, lb_addr_get_ptr(p, lb_build_addr_from_entity(p, e, nullptr)), one, type_size_of(e->type));
+	}
+	for (AstRangeSnapshotTarget const &target : snapshot->targets) {
+		lb_range_snapshot_target(p, s, target);
+	}
+	if (s->writes.count == 0) {
 		return;
 	}
+
+	LLVMValueRef apart = LLVMBuildNot(p->builder, s->wrapped, "");
+	for (lbRangeBytes const &w : s->writes) {
+		for (lbRangeBytes const &r : s->reads) {
+			LLVMValueRef before = lb_emit_comp(p, Token_LtEq, w.hi, r.lo).value;
+			LLVMValueRef after  = lb_emit_comp(p, Token_LtEq, r.hi, w.lo).value;
+			apart = LLVMBuildAnd(p->builder, apart, LLVMBuildOr(p->builder, before, after, ""), "");
+		}
+	}
+
 	lbBlock *fast = lb_create_block(p, "for.snapshot");
 	s->reload = lb_create_block(p, "for.reload");
 	s->after  = lb_create_block(p, "for.after");
-	lb_emit_if(p, s->apart, fast, s->reload);
+	lb_emit_if(p, {apart, t_llvm_bool}, fast, s->reload);
 	lb_start_block(p, fast);
+
+	for (lbRangeBase &b : s->bases) {
+		b.mapped = map_get(&p->range_snapshot_bases, b.use) == nullptr;
+		if (b.mapped) {
+			map_set(&p->range_snapshot_bases, b.use, b.copy);
+		}
+	}
 }
 
 // Ends the loop over the snapshot, and starts the usual loop with the body built again in the range statement's scope,
@@ -1323,6 +1433,11 @@ gb_internal void lb_range_snapshot_begin(lbProcedure *p, lbRangeSnapshot *s, Ast
 gb_internal bool lb_range_snapshot_reload(lbProcedure *p, lbRangeSnapshot *s, Scope *scope) {
 	if (s->reload == nullptr) {
 		return false;
+	}
+	for (lbRangeBase const &b : s->bases) {
+		if (b.mapped) {
+			map_remove(&p->range_snapshot_bases, b.use);
+		}
 	}
 	lb_emit_jump(p, s->after);
 	lb_open_scope(p, scope);
@@ -1334,7 +1449,6 @@ gb_internal bool lb_range_snapshot_reload(lbProcedure *p, lbRangeSnapshot *s, Sc
 // see `escape_range_snapshots`. It falls back to the usual loop when what the body writes may hold the header.
 gb_internal void lb_build_range_stmt_snapshot(lbProcedure *p, AstRangeStmt *rs, Scope *scope, lbValue array,
                                               Ast *val0, Ast *val1, Type *val0_type, Type *val1_type) {
-	lbModule *m = p->module;
 	Type *et = base_type(type_deref(array.type));
 	bool inline_elems = et->kind == Type_FixedCapacityDynamicArray;
 	Type *elem_type   = inline_elems ? et->FixedCapacityDynamicArray.elem : et->DynamicArray.elem;
@@ -1347,12 +1461,14 @@ gb_internal void lb_build_range_stmt_snapshot(lbProcedure *p, AstRangeStmt *rs, 
 	lb_fill_slice(p, slice, data, len);
 
 	// NOTE(bill): the loop reads the data and the length, or only the length of inline elements, which they never hold
-	lbRangeSnapshot s = {};
-	s.lo = lb_emit_conv(p, inline_elems ? len_ptr : array, t_uintptr);
-	s.hi = lb_emit_arith(p, Token_Add, lb_emit_conv(p, len_ptr, t_uintptr), lb_const_int(m, t_uintptr, type_size_of(t_int)), t_uintptr);
+	lbRangeSnapshot s = lb_range_snapshot_make();
+	if (inline_elems) {
+		lb_range_snapshot_read(p, &s, len_ptr, type_size_of(t_int));
+	} else {
+		lb_range_snapshot_read(p, &s, array, type_offset_of(et, 1) + type_size_of(t_int));
+	}
 	if (rs->snapshot->writes_elems && !inline_elems && !lb_range_over_no_alias_param(rs)) {
-		lbValue size = lb_emit_arith(p, Token_Mul, lb_emit_conv(p, len, t_uintptr), lb_const_int(m, t_uintptr, type_size_of(elem_type)), t_uintptr);
-		lb_range_snapshot_check(p, &s, data, size);
+		lb_range_snapshot_write(p, &s, data, len, type_size_of(elem_type));
 	}
 	lb_range_snapshot_begin(p, &s, rs->snapshot);
 
@@ -1509,20 +1625,16 @@ gb_internal void lb_build_range_stmt_struct_soa(lbProcedure *p, AstRangeStmt *rs
 	}
 
 	// NOTE(bill): the loop reads the columns of the header for each field of an element, and the length once before it
-	lbModule *m = p->module;
 	i32 columns = cast(i32)soa_field_count(lb_addr_type(array));
 	lbAddr copy = lb_add_local_generated(p, lb_addr_type(array), false);
 	lb_addr_store(p, copy, lb_addr_load(p, array));
 
-	lbRangeSnapshot s = {};
-	s.lo = lb_emit_conv(p, array.addr, t_uintptr);
-	s.hi = lb_emit_conv(p, lb_emit_struct_ep(p, array.addr, columns), t_uintptr);
-	lbValue len = lb_emit_conv(p, count, t_uintptr);
+	lbRangeSnapshot s = lb_range_snapshot_make();
+	lb_range_snapshot_read(p, &s, array.addr, type_offset_of(lb_addr_type(array), columns));
 	if (!lb_range_over_no_alias_param(rs)) {
 		for (i32 i : rs->snapshot->columns) {
 			lbValue column = lb_emit_load(p, lb_emit_struct_ep(p, copy.addr, i));
-			lbValue size   = lb_emit_arith(p, Token_Mul, len, lb_const_int(m, t_uintptr, type_size_of(type_deref(column.type, true))), t_uintptr);
-			lb_range_snapshot_check(p, &s, column, size);
+			lb_range_snapshot_write(p, &s, column, count, type_size_of(type_deref(column.type, true)));
 		}
 	}
 	lb_range_snapshot_begin(p, &s, rs->snapshot);

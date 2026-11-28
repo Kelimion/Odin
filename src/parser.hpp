@@ -456,12 +456,19 @@ struct AstSplitArgs {
 	Slice<Ast *> named;
 };
 
+// A base the body writes through (e.g. `out` of `out[i] = x`, or `p` of `p.x = y`), which the loop over the snapshot reads once
+struct AstRangeSnapshotTarget {
+	Ast *        base;
+	Slice<Ast *> uses; // the occurrences of it the body writes through
+};
+
 // What the body of a range loop over an array with a header writes, when nothing else in it could change the header,
 // see `escape_range_snapshots`
 struct AstRangeSnapshot {
-	bool            writes_elems; // through the loop's value
-	Slice<i32>      columns;      // of an #soa array, those the body writes
-	Slice<Entity *> outer;        // the outer locals and globals
+	bool                          writes_elems; // through the loop's value
+	Slice<i32>                    columns;      // of an #soa array, those the body writes
+	Slice<Entity *>               outer;        // the outer locals and globals
+	Slice<AstRangeSnapshotTarget> targets;
 };
 
 enum AsmMemoryOperandKind : u8 {
